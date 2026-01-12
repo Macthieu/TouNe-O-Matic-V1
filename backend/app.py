@@ -1,0 +1,1430 @@
+from __future__ import annotations
+
+import os
+from contextlib import contextmanager
+import hashlib
+import random
+import sqlite3
+import threading
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Iterable
+import re
+
+from flask import Flask, jsonify, request, send_file, make_response
+from PIL import Image
+from flask_cors import CORS
+from mpd import MPDClient, CommandError, ConnectionError as MPDConnectionError
+import requests
+
+
+MPD_HOST = os.environ.get("MPD_HOST", "127.0.0.1")
+MPD_PORT = int(os.environ.get("MPD_PORT", "6600"))
+PLAYLISTS_DIR = Path(os.environ.get("TOUNE_PLAYLISTS_DIR", "/mnt/libraries/playlists"))
+MUSIC_ROOT = Path(os.environ.get("TOUNE_MUSIC_ROOT", "/mnt/libraries/music"))
+DOCS_ROOT = Path(os.environ.get("TOUNE_DOCS_ROOT", "/mnt/libraries/docs"))
+DB_PATH = Path(os.environ.get("TOUNE_DB_PATH", "/srv/toune/data/toune.db"))
+CACHE_DIR = Path(os.environ.get("TOUNE_CACHE_DIR", "/srv/toune/data/cache"))
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+LASTFM_API_KEY = os.environ.get("LASTFM_API_KEY", "")
+DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN", "")
+GOOGLE_CSE_API_KEY = os.environ.get("GOOGLE_CSE_API_KEY", "")
+GOOGLE_CSE_CX = os.environ.get("GOOGLE_CSE_CX", "")
+
+SCAN_STATE = {
+    "running": False,
+    "phase": "idle",
+    "total": 0,
+    "done": 0,
+    "added": 0,
+    "updated": 0,
+    "removed": 0,
+    "errors": 0,
+    "started_at": None,
+    "finished_at": None,
+    "last_error": None,
+    "log": [],
+}
+
+DOCS_STATE = {
+    "running": False,
+    "phase": "idle",
+    "total_artists": 0,
+    "done_artists": 0,
+    "total_albums": 0,
+    "done_albums": 0,
+    "errors": 0,
+    "started_at": None,
+    "finished_at": None,
+    "last_error": None,
+    "log": [],
+}
+
+app = Flask(__name__)
+CORS(app)
+
+
+@contextmanager
+def mpd_client():
+    c = MPDClient()
+    c.timeout = 10
+    c.idletimeout = None
+    try:
+        c.connect(MPD_HOST, MPD_PORT)
+        yield c
+    finally:
+        try:
+            c.close()
+            c.disconnect()
+        except Exception:
+            pass
+
+
+def ok(data: Any = None, **extra):
+    payload = {"ok": True, "data": data}
+    payload.update(extra)
+    return jsonify(payload)
+
+
+def err(message: str, code: int = 400, **extra):
+    payload = {"ok": False, "error": message}
+    payload.update(extra)
+    return jsonify(payload), code
+
+
+def _db_connect():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_db():
+    schema = """
+    CREATE TABLE IF NOT EXISTS track (
+      id INTEGER PRIMARY KEY,
+      path TEXT UNIQUE NOT NULL,
+      title TEXT,
+      artist TEXT,
+      album TEXT,
+      albumartist TEXT,
+      track_no INTEGER,
+      disc_no INTEGER,
+      duration REAL,
+      genre TEXT,
+      year INTEGER,
+      mtime INTEGER
+    );
+    CREATE VIRTUAL TABLE IF NOT EXISTS track_fts
+    USING fts5(title, artist, album, path, content='track', content_rowid='id');
+    CREATE TRIGGER IF NOT EXISTS track_ai AFTER INSERT ON track BEGIN
+      INSERT INTO track_fts(rowid, title, artist, album, path)
+      VALUES (new.id, new.title, new.artist, new.album, new.path);
+    END;
+    CREATE TRIGGER IF NOT EXISTS track_ad AFTER DELETE ON track BEGIN
+      INSERT INTO track_fts(track_fts, rowid, title, artist, album, path)
+      VALUES('delete', old.id, old.title, old.artist, old.album, old.path);
+    END;
+    CREATE TRIGGER IF NOT EXISTS track_au AFTER UPDATE ON track BEGIN
+      INSERT INTO track_fts(track_fts, rowid, title, artist, album, path)
+      VALUES('delete', old.id, old.title, old.artist, old.album, old.path);
+      INSERT INTO track_fts(rowid, title, artist, album, path)
+      VALUES (new.id, new.title, new.artist, new.album, new.path);
+    END;
+    """
+    with _db_connect() as conn:
+        conn.executescript(schema)
+        _ensure_columns(conn, "track", {
+            "composer": "TEXT",
+            "work": "TEXT",
+        })
+
+
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str]):
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    for col, coltype in columns.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
+
+
+_init_db()
+
+
+def _parse_track_no(val: Optional[str]) -> Optional[int]:
+    if not val:
+        return None
+    if isinstance(val, (list, tuple)):
+        val = val[0] if val else None
+        if not val:
+            return None
+    try:
+        return int(str(val).split("/")[0])
+    except Exception:
+        return None
+
+
+def _parse_year(val: Optional[str]) -> Optional[int]:
+    if not val:
+        return None
+    if isinstance(val, (list, tuple)):
+        val = val[0] if val else None
+        if not val:
+            return None
+    try:
+        return int(str(val)[:4])
+    except Exception:
+        return None
+
+
+def _make_id(*parts: str) -> str:
+    raw = "||".join([p or "" for p in parts])
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _normalize_tag(val: Any, joiner: str = " / ") -> Optional[str]:
+    if val is None:
+        return None
+    if isinstance(val, (list, tuple)):
+        items = [str(v).strip() for v in val if v]
+        return joiner.join(items) if items else None
+    return str(val).strip() or None
+
+
+def _split_multi(value: Optional[str]) -> List[str]:
+    if not value:
+        return []
+    parts: List[str] = []
+    for chunk in re.split(r"[;/,]", value):
+        item = chunk.strip()
+        if item:
+            parts.append(item)
+    return parts
+
+
+def _tag(item: Dict[str, Any], *keys: str) -> Optional[Any]:
+    for k in keys:
+        if k in item and item[k] is not None:
+            return item[k]
+    return None
+
+
+def _log_event(state: Dict[str, Any], level: str, message: str, **data):
+    entry = {
+        "ts": int(time.time()),
+        "level": level,
+        "message": message,
+        "data": data or {},
+    }
+    state.setdefault("log", []).append(entry)
+    if len(state["log"]) > 500:
+        state["log"] = state["log"][-500:]
+
+
+def _safe_name(name: str) -> str:
+    return name.replace("/", " - ").replace("\\", " - ").strip()
+
+
+def _simplify_artist_name(name: str) -> str:
+    lowered = name.lower()
+    for token in [" feat.", " featuring ", " ft.", " & ", " / ", " x "]:
+        if token in lowered:
+            return name.split(token, 1)[0].strip()
+    return name
+
+
+def _playlist_path(name: str) -> Path:
+    if not name.endswith(".m3u"):
+        name = f"{name}.m3u"
+    return PLAYLISTS_DIR / name
+
+
+def _serve_image(path: Path, size: Optional[int] = None):
+    if not path.exists():
+        return err("image not found", 404)
+    if not size:
+        resp = make_response(send_file(path))
+        resp.headers["Cache-Control"] = "public, max-age=86400"
+        return resp
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    key = hashlib.md5(str(path).encode("utf-8")).hexdigest()[:10]
+    cache_name = f"{path.stem}_{key}_{size}.jpg"
+    cached = CACHE_DIR / cache_name
+    if not cached.exists() or cached.stat().st_mtime < path.stat().st_mtime:
+        with Image.open(path) as img:
+            img = img.convert("RGB")
+            img.thumbnail((size, size))
+            img.save(cached, "JPEG", quality=85, optimize=True)
+    resp = make_response(send_file(cached, mimetype="image/jpeg"))
+    resp.headers["Cache-Control"] = "public, max-age=86400"
+    return resp
+
+
+def _scan_library_worker():
+    SCAN_STATE.update({
+        "running": True,
+        "phase": "mpd_update",
+        "total": 0,
+        "done": 0,
+        "added": 0,
+        "updated": 0,
+        "removed": 0,
+        "errors": 0,
+        "started_at": time.time(),
+        "finished_at": None,
+        "last_error": None,
+    })
+    SCAN_STATE["log"] = []
+    _log_event(SCAN_STATE, "info", "Scan démarré")
+    try:
+        with mpd_client() as c:
+            try:
+                c.update()
+                _log_event(SCAN_STATE, "info", "MPD update lancé")
+            except Exception:
+                pass
+            _wait_mpd_update(c, timeout_s=300)
+            SCAN_STATE["phase"] = "indexing"
+            items = c.listallinfo()
+        files = [i for i in items if "file" in i]
+        SCAN_STATE["total"] = len(files)
+
+        with _db_connect() as conn:
+            cur = conn.execute("SELECT path, mtime FROM track")
+            existing = {row["path"]: row["mtime"] for row in cur.fetchall()}
+            seen = set()
+
+            for item in files:
+                rel_path = item.get("file")
+                if not rel_path:
+                    continue
+                seen.add(rel_path)
+                full_path = MUSIC_ROOT / rel_path
+                if not full_path.exists():
+                    continue
+                try:
+                    mtime = int(full_path.stat().st_mtime)
+                except Exception:
+                    mtime = None
+
+                if mtime is not None and existing.get(rel_path) == mtime:
+                    SCAN_STATE["done"] += 1
+                    continue
+
+                title = _normalize_tag(_tag(item, "title", "Title"))
+                artist = _normalize_tag(_tag(item, "artist", "Artist"))
+                album = _normalize_tag(_tag(item, "album", "Album"))
+                albumartist = _normalize_tag(_tag(item, "albumartist", "AlbumArtist"))
+                track_no = _parse_track_no(_tag(item, "track", "Track"))
+                disc_no = _parse_track_no(_tag(item, "disc", "Disc"))
+                duration = float(_tag(item, "time", "Time") or 0) or None
+                genre = _normalize_tag(_tag(item, "genre", "Genre"), joiner="; ")
+                year = _parse_year(_tag(item, "date", "Date"))
+                composer = _normalize_tag(_tag(item, "composer", "Composer"))
+                work = _normalize_tag(_tag(item, "work", "Work", "grouping", "Grouping"))
+
+                conn.execute(
+                    """
+                    INSERT INTO track(path, title, artist, album, albumartist, track_no, disc_no, duration, genre, year, mtime, composer, work)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(path) DO UPDATE SET
+                      title=excluded.title,
+                      artist=excluded.artist,
+                      album=excluded.album,
+                      albumartist=excluded.albumartist,
+                      track_no=excluded.track_no,
+                      disc_no=excluded.disc_no,
+                      duration=excluded.duration,
+                      genre=excluded.genre,
+                      year=excluded.year,
+                      mtime=excluded.mtime,
+                      composer=excluded.composer,
+                      work=excluded.work
+                    """,
+                    (
+                        rel_path,
+                        title,
+                        artist,
+                        album,
+                        albumartist,
+                        track_no,
+                        disc_no,
+                        duration,
+                        genre,
+                        year,
+                        mtime,
+                        composer,
+                        work,
+                    ),
+                )
+                if rel_path in existing:
+                    SCAN_STATE["updated"] += 1
+                else:
+                    SCAN_STATE["added"] += 1
+                SCAN_STATE["done"] += 1
+
+            # cleanup removed files
+            to_remove = [p for p in existing.keys() if p not in seen]
+            if to_remove:
+                conn.executemany("DELETE FROM track WHERE path = ?", [(p,) for p in to_remove])
+                SCAN_STATE["removed"] = len(to_remove)
+        _log_event(SCAN_STATE, "info", "Scan terminé", total=SCAN_STATE["total"], added=SCAN_STATE["added"], updated=SCAN_STATE["updated"], removed=SCAN_STATE["removed"])
+    except Exception as e:
+        SCAN_STATE["errors"] += 1
+        SCAN_STATE["last_error"] = str(e)
+        _log_event(SCAN_STATE, "error", "Erreur scan", error=str(e))
+    finally:
+        SCAN_STATE["running"] = False
+        SCAN_STATE["phase"] = "idle"
+        SCAN_STATE["finished_at"] = time.time()
+
+
+@app.get("/api/health")
+def health():
+    return ok({
+        "service": "toune-backend",
+        "mpd": f"{MPD_HOST}:{MPD_PORT}",
+        "db": str(DB_PATH),
+        "music_root": str(MUSIC_ROOT),
+        "docs_root": str(DOCS_ROOT),
+    })
+
+
+@app.get("/api/mpd/status")
+def mpd_status():
+    try:
+        with mpd_client() as c:
+            status = c.status()
+            cur = c.currentsong()
+            return ok({"status": status, "current": cur})
+    except (MPDConnectionError, OSError) as e:
+        return err("MPD unreachable", 503, detail=str(e))
+    except CommandError as e:
+        return err("MPD command error", 500, detail=str(e))
+
+
+@app.post("/api/mpd/play")
+def mpd_play():
+    pos = request.args.get("pos")
+    try:
+        with mpd_client() as c:
+            if pos is not None:
+                c.play(int(pos))
+            else:
+                c.play()
+            return ok()
+    except Exception as e:
+        return err("play failed", 500, detail=str(e))
+
+
+@app.post("/api/mpd/pause")
+def mpd_pause():
+    val = request.args.get("value", "1")
+    try:
+        with mpd_client() as c:
+            c.pause(1 if val not in ("0", "false", "False") else 0)
+            return ok()
+    except Exception as e:
+        return err("pause failed", 500, detail=str(e))
+
+
+@app.post("/api/mpd/seek")
+def mpd_seek():
+    pos = request.args.get("pos")
+    if pos is None:
+        return err("missing ?pos=")
+    try:
+        with mpd_client() as c:
+            c.seekcur(float(pos))
+            return ok()
+    except Exception as e:
+        return err("seek failed", 500, detail=str(e))
+
+
+@app.post("/api/mpd/volume")
+def mpd_volume():
+    val = request.args.get("value")
+    if val is None:
+        return err("missing ?value=")
+    try:
+        vol = max(0, min(100, int(float(val))))
+        with mpd_client() as c:
+            c.setvol(vol)
+            return ok()
+    except Exception as e:
+        return err("volume failed", 500, detail=str(e))
+
+
+@app.post("/api/mpd/random")
+def mpd_random():
+    val = request.args.get("value", "0")
+    try:
+        with mpd_client() as c:
+            c.random(1 if val not in ("0", "false", "False") else 0)
+            return ok()
+    except Exception as e:
+        return err("random failed", 500, detail=str(e))
+
+
+@app.post("/api/mpd/repeat")
+def mpd_repeat():
+    mode = (request.args.get("mode") or "").lower()
+    if not mode:
+        return err("missing ?mode=")
+    if mode in ("off", "0", "false"):
+        repeat = 0
+        single = 0
+    elif mode in ("all", "1", "true"):
+        repeat = 1
+        single = 0
+    elif mode in ("one", "single"):
+        repeat = 1
+        single = 1
+    else:
+        return err("invalid mode (off|all|one)")
+    try:
+        with mpd_client() as c:
+            c.repeat(repeat)
+            c.single(single)
+            return ok()
+    except Exception as e:
+        return err("repeat failed", 500, detail=str(e))
+
+
+@app.post("/api/mpd/stop")
+def mpd_stop():
+    try:
+        with mpd_client() as c:
+            c.stop()
+            return ok()
+    except Exception as e:
+        return err("stop failed", 500, detail=str(e))
+
+
+@app.post("/api/mpd/next")
+def mpd_next():
+    try:
+        with mpd_client() as c:
+            c.next()
+            return ok()
+    except Exception as e:
+        return err("next failed", 500, detail=str(e))
+
+
+@app.post("/api/mpd/prev")
+def mpd_prev():
+    try:
+        with mpd_client() as c:
+            c.previous()
+            return ok()
+    except Exception as e:
+        return err("prev failed", 500, detail=str(e))
+
+
+@app.post("/api/mpd/clear")
+def mpd_clear():
+    try:
+        with mpd_client() as c:
+            c.clear()
+            return ok()
+    except Exception as e:
+        return err("clear failed", 500, detail=str(e))
+
+
+@app.post("/api/mpd/add")
+def mpd_add():
+    # expect ?path=Artist/Album/Track.flac (path MPD relatif au music_directory)
+    p = request.args.get("path", "")
+    if not p:
+        return err("missing ?path=")
+    try:
+        with mpd_client() as c:
+            c.add(p)
+            return ok()
+    except Exception as e:
+        return err("add failed", 500, detail=str(e))
+
+
+@app.post("/api/mpd/add-many")
+def mpd_add_many():
+    data = request.get_json(silent=True) or {}
+    paths = data.get("paths") or []
+    clear = bool(data.get("clear"))
+    play = bool(data.get("play"))
+    if not paths:
+        return err("missing paths")
+    try:
+        with mpd_client() as c:
+            if clear:
+                c.clear()
+            for p in paths:
+                if p:
+                    c.add(p)
+            if play:
+                c.play()
+        return ok({"added": len(paths), "cleared": clear, "played": play})
+    except Exception as e:
+        return err("add-many failed", 500, detail=str(e))
+
+
+@app.get("/api/mpd/queue")
+def mpd_queue():
+    try:
+        with mpd_client() as c:
+            pl = c.playlistinfo()
+            return ok(pl)
+    except Exception as e:
+        return err("queue failed", 500, detail=str(e))
+
+
+@app.get("/api/library/search")
+def library_search():
+    # ?q=blind melon&limit=50
+    q = (request.args.get("q") or "").strip()
+    limit = int(request.args.get("limit", "50"))
+    if not q:
+        return err("missing ?q=")
+    tokens = [t for t in q.replace('"', " ").split() if t]
+    if not tokens:
+        return err("invalid query")
+    fts_query = " ".join([f'{t}*' for t in tokens])
+    try:
+        with _db_connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT track.*
+                FROM track_fts
+                JOIN track ON track_fts.rowid = track.id
+                WHERE track_fts MATCH ?
+                LIMIT ?
+                """,
+                (fts_query, limit),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+        return ok(rows, count=len(rows))
+    except Exception as e:
+        return err("search failed", 500, detail=str(e))
+
+
+@app.get("/api/library/summary")
+def library_summary():
+    try:
+        with _db_connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT path, title, artist, album, albumartist, track_no, disc_no, duration, genre, year, mtime, composer, work
+                FROM track
+                ORDER BY artist, album, track_no
+                """
+            ).fetchall()
+        tracks = [dict(r) for r in rows]
+    except Exception as e:
+        return err("summary failed", 500, detail=str(e))
+
+    artists_map: Dict[str, Dict[str, Any]] = {}
+    albumartists_map: Dict[str, Dict[str, Any]] = {}
+    albums_map: Dict[str, Dict[str, Any]] = {}
+    genres_map: Dict[str, int] = {}
+    years_map: Dict[int, int] = {}
+    composers_map: Dict[str, int] = {}
+    works_map: Dict[str, int] = {}
+    folders_map: Dict[str, int] = {}
+    album_mtime: Dict[str, int] = {}
+
+    for t in tracks:
+        artist = t.get("artist") or "Artiste inconnu"
+        albumartist = t.get("albumartist") or artist
+        album = t.get("album") or "Album inconnu"
+        year = t.get("year") or 0
+        genre = t.get("genre") or ""
+        composer = t.get("composer") or ""
+        work = t.get("work") or ""
+
+        artist_id = _make_id("artist", artist)
+        albumartist_id = _make_id("albumartist", albumartist)
+        album_id = _make_id("album", artist, album)
+
+        if artist_id not in artists_map:
+            artists_map[artist_id] = {"id": artist_id, "name": artist, "albums": []}
+        if albumartist_id not in albumartists_map:
+            albumartists_map[albumartist_id] = {"id": albumartist_id, "name": albumartist, "albums": []}
+        if album_id not in albums_map:
+            albums_map[album_id] = {
+                "id": album_id,
+                "title": album,
+                "artist": artist,
+                "year": year,
+                "tracks": [],
+            }
+        track_obj = {
+            "title": t.get("title") or Path(t.get("path") or "").name,
+            "artist": artist,
+            "album": album,
+            "duration": t.get("duration") or 0,
+            "trackNo": t.get("track_no") or 0,
+            "year": year or None,
+            "path": t.get("path"),
+        }
+        albums_map[album_id]["tracks"].append(track_obj)
+
+        if not any(al["id"] == album_id for al in artists_map[artist_id]["albums"]):
+            artists_map[artist_id]["albums"].append(albums_map[album_id])
+        if not any(al["id"] == album_id for al in albumartists_map[albumartist_id]["albums"]):
+            albumartists_map[albumartist_id]["albums"].append(albums_map[album_id])
+
+        if genre:
+            for g in _split_multi(genre):
+                genres_map[g] = genres_map.get(g, 0) + 1
+        if year:
+            years_map[int(year)] = years_map.get(int(year), 0) + 1
+        if composer:
+            for c in _split_multi(composer):
+                composers_map[c] = composers_map.get(c, 0) + 1
+        if work:
+            works_map[work] = works_map.get(work, 0) + 1
+        if t.get("path"):
+            top = str(t["path"]).split("/", 1)[0]
+            if top:
+                folders_map[top] = folders_map.get(top, 0) + 1
+        if t.get("mtime"):
+            album_mtime[album_id] = max(album_mtime.get(album_id, 0), int(t["mtime"]))
+
+    for album in albums_map.values():
+        album["tracks"].sort(key=lambda x: (x.get("trackNo") or 0, x.get("title") or ""))
+
+    playlists = _list_playlists()
+    newmusic = sorted(
+        [albums_map[a] for a in albums_map.keys()],
+        key=lambda a: album_mtime.get(a["id"], 0),
+        reverse=True,
+    )[:20]
+    randommix = random.sample(tracks, k=min(25, len(tracks))) if tracks else []
+    summary = {
+        "artists": list(artists_map.values()),
+        "albumartists": list(albumartists_map.values()),
+        "albums": list(albums_map.values()),
+        "genres": [{"name": k, "count": v} for k, v in genres_map.items()],
+        "years": [{"year": k, "count": v} for k, v in years_map.items()],
+        "composers": [{"name": k, "count": v} for k, v in composers_map.items()],
+        "works": [{"name": k, "count": v} for k, v in works_map.items()],
+        "newmusic": newmusic,
+        "randommix": randommix,
+        "folders": [{"name": k, "count": v} for k, v in folders_map.items()],
+        "playlists": playlists,
+        "radios": [],
+        "favourites": [],
+        "apps": [],
+    }
+    return ok(summary)
+
+
+@app.post("/api/library/scan")
+def library_scan():
+    if SCAN_STATE["running"]:
+        return ok(SCAN_STATE, note="scan already running")
+    t = threading.Thread(target=_scan_library_worker, daemon=True)
+    t.start()
+    return ok(SCAN_STATE, note="scan started")
+
+
+@app.get("/api/library/scan/status")
+def library_scan_status():
+    return ok(SCAN_STATE)
+
+
+@app.get("/api/library/scan/logs")
+def library_scan_logs():
+    return ok(SCAN_STATE.get("log", []))
+
+
+@app.get("/api/playlists")
+def playlists_list():
+    return ok(_list_playlists())
+
+
+@app.post("/api/playlists/create")
+def playlists_create():
+    name = (request.args.get("name") or "").strip()
+    if not name:
+        data = request.get_json(silent=True) or {}
+        name = (data.get("name") or "").strip()
+    if not name:
+        return err("missing playlist name")
+    PLAYLISTS_DIR.mkdir(parents=True, exist_ok=True)
+    p = _playlist_path(name)
+    if not p.exists():
+        p.write_text("#EXTM3U\n", encoding="utf-8")
+    return ok({"name": p.name})
+
+
+@app.post("/api/playlists/append")
+def playlists_append():
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    paths = data.get("paths") or []
+    if not name:
+        return err("missing playlist name")
+    if not paths:
+        return err("missing paths")
+    PLAYLISTS_DIR.mkdir(parents=True, exist_ok=True)
+    p = _playlist_path(name)
+    if not p.exists():
+        p.write_text("#EXTM3U\n", encoding="utf-8")
+    with p.open("a", encoding="utf-8") as f:
+        for path in paths:
+            if path:
+                f.write(f"{path}\n")
+    return ok({"name": p.name, "added": len(paths)})
+
+
+@app.post("/api/playlists/load")
+def playlists_load():
+    # charge une .m3u (qui contient des chemins absolus ou relatifs)
+    name = request.args.get("name", "")
+    if not name:
+        return err("missing ?name=")
+    p = PLAYLISTS_DIR / name
+    if not p.exists():
+        return err("playlist not found", 404)
+
+    try:
+        lines = [ln.strip() for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
+        tracks = [ln for ln in lines if ln and not ln.startswith("#")]
+
+        # Convertit chemins absolus vers chemins MPD relatifs
+        # Ex: /mnt/media/wd/Musique/Artist/Album/1 - Track.flac  -> Artist/Album/1 - Track.flac
+        # MPD voit /mnt/libraries/music -> /mnt/media/wd/Musique (symlink)
+        prefix_candidates = [
+            "/mnt/libraries/music/",
+            "/mnt/media/wd/Musique/",
+        ]
+
+        def to_mpd_path(x: str) -> Optional[str]:
+            for pref in prefix_candidates:
+                if x.startswith(pref):
+                    return x[len(pref):]
+            # si c'est déjà relatif, on accepte tel quel
+            if not x.startswith("/"):
+                return x
+            return None  # on ignore ce qu'on ne peut pas mapper
+
+        mapped = [to_mpd_path(t) for t in tracks]
+        mapped = [m for m in mapped if m]
+
+        with mpd_client() as c:
+            c.clear()
+            for m in mapped:
+                c.add(m)
+            c.play()
+        return ok({"loaded": name, "tracks_added": len(mapped), "tracks_in_file": len(tracks)})
+    except Exception as e:
+        return err("load playlist failed", 500, detail=str(e))
+
+
+@app.post("/api/playlists/queue")
+def playlists_queue():
+    name = request.args.get("name", "")
+    if not name:
+        return err("missing ?name=")
+    p = PLAYLISTS_DIR / name
+    if not p.exists():
+        return err("playlist not found", 404)
+    try:
+        lines = [ln.strip() for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
+        tracks = [ln for ln in lines if ln and not ln.startswith("#")]
+
+        prefix_candidates = [
+            "/mnt/libraries/music/",
+            "/mnt/media/wd/Musique/",
+        ]
+
+        def to_mpd_path(x: str) -> Optional[str]:
+            for pref in prefix_candidates:
+                if x.startswith(pref):
+                    return x[len(pref):]
+            if not x.startswith("/"):
+                return x
+            return None
+
+        mapped = [to_mpd_path(t) for t in tracks]
+        mapped = [m for m in mapped if m]
+
+        with mpd_client() as c:
+            for m in mapped:
+                c.add(m)
+        return ok({"queued": name, "tracks_added": len(mapped), "tracks_in_file": len(tracks)})
+    except Exception as e:
+        return err("queue playlist failed", 500, detail=str(e))
+
+
+@app.get("/api/docs/artist/bio")
+def docs_artist_bio():
+    name = (request.args.get("name") or "").strip()
+    if not name:
+        return err("missing ?name=")
+    bio_dir = DOCS_ROOT / "Biographies"
+    match = _find_doc_file(bio_dir, name, [".txt"])
+    if not match:
+        return err("bio not found", 404)
+    return ok({"name": name, "text": match.read_text(encoding="utf-8", errors="ignore")})
+
+
+@app.get("/api/docs/artist/photo")
+def docs_artist_photo():
+    name = (request.args.get("name") or "").strip()
+    if not name:
+        return err("missing ?name=")
+    photo_dir = DOCS_ROOT / "Photos d'artiste"
+    match = _find_doc_file(photo_dir, name, [".jpg", ".jpeg", ".png"])
+    if not match:
+        return err("photo not found", 404)
+    size = request.args.get("size")
+    return _serve_image(match, int(size) if size else None)
+
+
+@app.get("/api/docs/album/review")
+def docs_album_review():
+    title = (request.args.get("title") or "").strip()
+    if not title:
+        return err("missing ?title=")
+    review_dir = DOCS_ROOT / "Critiques d'albums"
+    match = _find_doc_file(review_dir, title, [".txt"])
+    if not match:
+        return err("review not found", 404)
+    return ok({"title": title, "text": match.read_text(encoding="utf-8", errors="ignore")})
+
+
+@app.get("/api/docs/album/art")
+def docs_album_art():
+    artist = (request.args.get("artist") or "").strip()
+    album = (request.args.get("album") or "").strip()
+    if not artist or not album:
+        return err("missing ?artist=&album=")
+    docs_cover = _find_doc_file(DOCS_ROOT / "Pochettes", album, [".jpg", ".jpeg", ".png"])
+    if docs_cover:
+        size = request.args.get("size")
+        return _serve_image(docs_cover, int(size) if size else None)
+    album_dir = MUSIC_ROOT / artist / album
+    if not album_dir.exists():
+        return err("album folder not found", 404)
+    for name in ("cover.jpg", "folder.jpg", "cover.png", "folder.png"):
+        p = album_dir / name
+        if p.exists():
+            size = request.args.get("size")
+            return _serve_image(p, int(size) if size else None)
+    return err("art not found", 404)
+
+
+def _list_playlists() -> List[Dict[str, Any]]:
+    if not PLAYLISTS_DIR.exists():
+        return []
+    items: List[Dict[str, Any]] = []
+    for p in sorted(PLAYLISTS_DIR.glob("*.m3u")):
+        try:
+            lines = [ln.strip() for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
+            tracks = [ln for ln in lines if ln and not ln.startswith("#")]
+            items.append({"name": p.name, "tracks": len(tracks)})
+        except Exception:
+            items.append({"name": p.name, "tracks": 0})
+    return items
+
+
+def _find_doc_file(folder: Path, name: str, exts: List[str]) -> Optional[Path]:
+    if not folder.exists():
+        return None
+    wanted = name.strip().lower()
+    wanted_safe = _safe_name(name).lower()
+    for p in folder.iterdir():
+        if p.is_file() and p.suffix.lower() in exts:
+            stem = p.stem.strip().lower()
+            if stem == wanted or stem == wanted_safe:
+                return p
+    return None
+
+
+def _wait_mpd_update(c: MPDClient, timeout_s: int = 120):
+    start = time.time()
+    while time.time() - start < timeout_s:
+        try:
+            st = c.status()
+        except Exception:
+            break
+        if "updating_db" not in st:
+            return
+        time.sleep(1)
+
+
+@app.post("/api/docs/fetch")
+def docs_fetch():
+    if DOCS_STATE["running"]:
+        return ok(DOCS_STATE, note="fetch already running")
+    force = request.args.get("force") in ("1", "true", "yes")
+    t = threading.Thread(target=_docs_fetch_worker, args=(force,), daemon=True)
+    t.start()
+    return ok(DOCS_STATE, note="fetch started")
+
+
+@app.get("/api/docs/fetch/status")
+def docs_fetch_status():
+    return ok(DOCS_STATE)
+
+
+@app.get("/api/docs/fetch/logs")
+def docs_fetch_logs():
+    return ok(DOCS_STATE.get("log", []))
+
+
+def _docs_fetch_worker(force: bool = False):
+    DOCS_STATE.update({
+        "running": True,
+        "phase": "init",
+        "total_artists": 0,
+        "done_artists": 0,
+        "total_albums": 0,
+        "done_albums": 0,
+        "errors": 0,
+        "started_at": time.time(),
+        "finished_at": None,
+        "last_error": None,
+    })
+    DOCS_STATE["log"] = []
+    _log_event(DOCS_STATE, "info", "Récupération web démarrée")
+    if not OPENAI_API_KEY:
+        _log_event(DOCS_STATE, "warn", "OPENAI_API_KEY manquant (traduction désactivée)")
+    if not LASTFM_API_KEY:
+        _log_event(DOCS_STATE, "warn", "LASTFM_API_KEY manquant")
+    if not DISCOGS_TOKEN:
+        _log_event(DOCS_STATE, "warn", "DISCOGS_TOKEN manquant")
+    if not GOOGLE_CSE_API_KEY or not GOOGLE_CSE_CX:
+        _log_event(DOCS_STATE, "warn", "Google CSE non configuré (photos artistes)")
+    try:
+        with _db_connect() as conn:
+            artists = [r["name"] for r in conn.execute("SELECT DISTINCT artist as name FROM track WHERE artist IS NOT NULL")]
+            albums = conn.execute(
+                "SELECT DISTINCT album, artist FROM track WHERE album IS NOT NULL AND artist IS NOT NULL"
+            ).fetchall()
+        DOCS_STATE["total_artists"] = len(artists)
+        DOCS_STATE["total_albums"] = len(albums)
+
+        DOCS_STATE["phase"] = "artists"
+        for name in artists:
+            _fetch_artist_docs(name, force)
+            DOCS_STATE["done_artists"] += 1
+            time.sleep(0.2)
+
+        DOCS_STATE["phase"] = "albums"
+        for row in albums:
+            _fetch_album_docs(row["artist"], row["album"], force)
+            DOCS_STATE["done_albums"] += 1
+            time.sleep(0.2)
+    except Exception as e:
+        DOCS_STATE["errors"] += 1
+        DOCS_STATE["last_error"] = str(e)
+        _log_event(DOCS_STATE, "error", "Erreur récupération web", error=str(e))
+    finally:
+        DOCS_STATE["running"] = False
+        DOCS_STATE["phase"] = "idle"
+        DOCS_STATE["finished_at"] = time.time()
+        _log_event(DOCS_STATE, "info", "Récupération web terminée")
+
+
+def _fetch_artist_docs(name: str, force: bool):
+    safe = _safe_name(name)
+    bio_path = DOCS_ROOT / "Biographies" / f"{safe}.txt"
+    photo_path = DOCS_ROOT / "Photos d'artiste" / f"{safe}.jpg"
+    bio_path.parent.mkdir(parents=True, exist_ok=True)
+    photo_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if bio_path.exists() and not force:
+        _log_event(DOCS_STATE, "info", "Bio déjà présente", artist=name)
+    else:
+        bio, lang, source = _get_artist_bio(name)
+        if bio:
+            if lang != "fr":
+                bio = _translate_to_fr(bio, source_lang=lang, source=source)
+            _write_text_file(bio_path, bio, source=source, translated=(lang != "fr"))
+            _log_event(DOCS_STATE, "info", "Bio enregistrée", artist=name, source=source)
+        else:
+            _log_event(DOCS_STATE, "warn", "Bio introuvable", artist=name)
+
+    if photo_path.exists() and not force:
+        _log_event(DOCS_STATE, "info", "Photo déjà présente", artist=name)
+    else:
+        img_url, source = _get_artist_photo(name)
+        if img_url:
+            if _download_image(img_url, photo_path):
+                _log_event(DOCS_STATE, "info", "Photo enregistrée", artist=name, source=source)
+            else:
+                _log_event(DOCS_STATE, "warn", "Photo download échouée", artist=name, source=source)
+        else:
+            _log_event(DOCS_STATE, "warn", "Photo introuvable", artist=name)
+
+
+def _fetch_album_docs(artist: str, album: str, force: bool):
+    safe_album = _safe_name(album)
+    review_path = DOCS_ROOT / "Critiques d'albums" / f"{safe_album}.txt"
+    cover_path = DOCS_ROOT / "Pochettes" / f"{safe_album}.jpg"
+    review_path.parent.mkdir(parents=True, exist_ok=True)
+    cover_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if review_path.exists() and not force:
+        _log_event(DOCS_STATE, "info", "Critique déjà présente", album=album)
+    else:
+        review, lang, source = _get_album_review(artist, album)
+        if review:
+            if lang != "fr":
+                review = _translate_to_fr(review, source_lang=lang, source=source)
+            _write_text_file(review_path, review, source=source, translated=(lang != "fr"))
+            _log_event(DOCS_STATE, "info", "Critique enregistrée", album=album, source=source)
+        else:
+            _log_event(DOCS_STATE, "warn", "Critique introuvable", album=album)
+
+    if cover_path.exists() and not force:
+        _log_event(DOCS_STATE, "info", "Pochette déjà présente", album=album)
+    else:
+        img_url, source = _get_album_cover(artist, album)
+        if img_url:
+            if _download_image(img_url, cover_path):
+                _log_event(DOCS_STATE, "info", "Pochette enregistrée", album=album, source=source)
+            else:
+                _log_event(DOCS_STATE, "warn", "Pochette download échouée", album=album, source=source)
+        else:
+            _log_event(DOCS_STATE, "warn", "Pochette introuvable", album=album)
+
+
+def _get_artist_bio(name: str) -> Tuple[Optional[str], str, str]:
+    text = _wikipedia_summary(name, "fr")
+    if text:
+        return text, "fr", "wikipedia"
+    text = _lastfm_artist_bio(name, lang="fr")
+    if text:
+        return text, "fr", "lastfm"
+    text = _wikipedia_summary(name, "en")
+    if text:
+        return text, "en", "wikipedia"
+    text = _lastfm_artist_bio(name, lang="en")
+    if text:
+        return text, "en", "lastfm"
+    text = _discogs_artist_profile(name)
+    if text:
+        return text, "en", "discogs"
+    simple = _simplify_artist_name(name)
+    if simple != name:
+        text = _wikipedia_summary(simple, "fr") or _wikipedia_summary(simple, "en")
+        if text:
+            return text, "en", "wikipedia"
+    return None, "fr", ""
+
+
+def _get_artist_photo(name: str) -> Tuple[Optional[str], str]:
+    url = _wikipedia_image(name, "fr") or _wikipedia_image(name, "en")
+    if url:
+        return url, "wikipedia"
+    url = _lastfm_artist_image(name)
+    if url:
+        return url, "lastfm"
+    url = _discogs_artist_image(name)
+    if url:
+        return url, "discogs"
+    simple = _simplify_artist_name(name)
+    if simple != name:
+        url = _wikipedia_image(simple, "fr") or _wikipedia_image(simple, "en")
+        if url:
+            return url, "wikipedia"
+    url = _google_artist_image(name)
+    if url:
+        return url, "google"
+    return None, ""
+
+
+def _get_album_review(artist: str, album: str) -> Tuple[Optional[str], str, str]:
+    text = _lastfm_album_review(artist, album, lang="fr")
+    if text:
+        return text, "fr", "lastfm"
+    text = _wikipedia_summary(f"{album} ({artist})", "fr") or _wikipedia_summary(f"{album} (album)", "fr")
+    if text:
+        return text, "fr", "wikipedia"
+    text = _lastfm_album_review(artist, album, lang="en")
+    if text:
+        return text, "en", "lastfm"
+    text = _wikipedia_summary(f"{album} ({artist})", "en") or _wikipedia_summary(f"{album} (album)", "en")
+    if text:
+        return text, "en", "wikipedia"
+    text = _discogs_release_notes(artist, album)
+    if text:
+        return text, "en", "discogs"
+    return None, "fr", ""
+
+
+def _get_album_cover(artist: str, album: str) -> Tuple[Optional[str], str]:
+    url = _cover_art_archive(artist, album)
+    if url:
+        return url, "coverartarchive"
+    url = _lastfm_album_image(artist, album)
+    if url:
+        return url, "lastfm"
+    url = _wikipedia_image(f"{album} ({artist})", "fr") or _wikipedia_image(f"{album} (album)", "en")
+    if url:
+        return url, "wikipedia"
+    return None, ""
+
+
+def _wikipedia_summary(title: str, lang: str) -> Optional[str]:
+    try:
+        url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(title)}"
+        res = requests.get(url, timeout=10)
+        if res.status_code != 200:
+            return None
+        data = res.json()
+        return data.get("extract")
+    except Exception:
+        return None
+
+
+def _wikipedia_image(title: str, lang: str) -> Optional[str]:
+    try:
+        url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(title)}"
+        res = requests.get(url, timeout=10)
+        if res.status_code != 200:
+            return None
+        data = res.json()
+        return data.get("thumbnail", {}).get("source")
+    except Exception:
+        return None
+
+
+def _lastfm_artist_bio(name: str, lang: str = "fr") -> Optional[str]:
+    if not LASTFM_API_KEY:
+        return None
+    try:
+        url = "https://ws.audioscrobbler.com/2.0/"
+        params = {
+            "method": "artist.getinfo",
+            "artist": name,
+            "api_key": LASTFM_API_KEY,
+            "format": "json",
+            "lang": lang,
+        }
+        res = requests.get(url, params=params, timeout=10)
+        if res.status_code != 200:
+            return None
+        bio = res.json().get("artist", {}).get("bio", {}).get("content")
+        return _strip_lastfm(bio)
+    except Exception:
+        return None
+
+
+def _lastfm_artist_image(name: str) -> Optional[str]:
+    if not LASTFM_API_KEY:
+        return None
+    try:
+        url = "https://ws.audioscrobbler.com/2.0/"
+        params = {"method": "artist.getinfo", "artist": name, "api_key": LASTFM_API_KEY, "format": "json"}
+        res = requests.get(url, params=params, timeout=10)
+        if res.status_code != 200:
+            return None
+        images = res.json().get("artist", {}).get("image", [])
+        for img in reversed(images):
+            if img.get("#text"):
+                return img.get("#text")
+    except Exception:
+        return None
+    return None
+
+
+def _lastfm_album_review(artist: str, album: str, lang: str = "fr") -> Optional[str]:
+    if not LASTFM_API_KEY:
+        return None
+    try:
+        url = "https://ws.audioscrobbler.com/2.0/"
+        params = {
+            "method": "album.getinfo",
+            "artist": artist,
+            "album": album,
+            "api_key": LASTFM_API_KEY,
+            "format": "json",
+            "lang": lang,
+        }
+        res = requests.get(url, params=params, timeout=10)
+        if res.status_code != 200:
+            return None
+        wiki = res.json().get("album", {}).get("wiki", {}).get("content")
+        return _strip_lastfm(wiki)
+    except Exception:
+        return None
+
+
+def _lastfm_album_image(artist: str, album: str) -> Optional[str]:
+    if not LASTFM_API_KEY:
+        return None
+    try:
+        url = "https://ws.audioscrobbler.com/2.0/"
+        params = {"method": "album.getinfo", "artist": artist, "album": album, "api_key": LASTFM_API_KEY, "format": "json"}
+        res = requests.get(url, params=params, timeout=10)
+        if res.status_code != 200:
+            return None
+        images = res.json().get("album", {}).get("image", [])
+        for img in reversed(images):
+            if img.get("#text"):
+                return img.get("#text")
+    except Exception:
+        return None
+    return None
+
+
+def _discogs_search(query: str, type_: str):
+    if not DISCOGS_TOKEN:
+        return None
+    url = "https://api.discogs.com/database/search"
+    params = {"q": query, "type": type_, "token": DISCOGS_TOKEN}
+    res = requests.get(url, params=params, timeout=10)
+    if res.status_code != 200:
+        return None
+    data = res.json().get("results", [])
+    return data[0] if data else None
+
+
+def _discogs_artist_profile(name: str) -> Optional[str]:
+    hit = _discogs_search(name, "artist")
+    if not hit:
+        return None
+    rid = hit.get("id")
+    if not rid:
+        return None
+    res = requests.get(f"https://api.discogs.com/artists/{rid}", params={"token": DISCOGS_TOKEN}, timeout=10)
+    if res.status_code != 200:
+        return None
+    profile = res.json().get("profile")
+    return _strip_html(profile) if profile else None
+
+
+def _discogs_artist_image(name: str) -> Optional[str]:
+    hit = _discogs_search(name, "artist")
+    if not hit:
+        return None
+    return hit.get("thumb") or hit.get("cover_image")
+
+
+def _discogs_release_notes(artist: str, album: str) -> Optional[str]:
+    hit = _discogs_search(f"{artist} {album}", "release")
+    if not hit:
+        return None
+    rid = hit.get("id")
+    if not rid:
+        return None
+    res = requests.get(f"https://api.discogs.com/releases/{rid}", params={"token": DISCOGS_TOKEN}, timeout=10)
+    if res.status_code != 200:
+        return None
+    notes = res.json().get("notes")
+    return _strip_html(notes) if notes else None
+
+
+def _cover_art_archive(artist: str, album: str) -> Optional[str]:
+    try:
+        url = "https://musicbrainz.org/ws/2/release-group/"
+        query = f'artist:"{artist}" AND releasegroup:"{album}"'
+        res = requests.get(url, params={"query": query, "fmt": "json"}, timeout=10)
+        if res.status_code != 200:
+            return None
+        groups = res.json().get("release-groups", [])
+        if not groups:
+            return None
+        mbid = groups[0].get("id")
+        if not mbid:
+            return None
+        caa = requests.get(f"https://coverartarchive.org/release-group/{mbid}", timeout=10)
+        if caa.status_code != 200:
+            return None
+        images = caa.json().get("images", [])
+        for img in images:
+            if img.get("front"):
+                return img.get("image")
+    except Exception:
+        return None
+    return None
+
+
+def _google_artist_image(name: str) -> Optional[str]:
+    if not GOOGLE_CSE_API_KEY or not GOOGLE_CSE_CX:
+        return None
+    try:
+        url = "https://www.googleapis.com/customsearch/v1"
+        params = {
+            "key": GOOGLE_CSE_API_KEY,
+            "cx": GOOGLE_CSE_CX,
+            "q": f"{name} artist photo",
+            "searchType": "image",
+            "safe": "active",
+            "num": 1,
+            "imgType": "photo",
+        }
+        res = requests.get(url, params=params, timeout=10)
+        if res.status_code != 200:
+            return None
+        items = res.json().get("items", [])
+        if not items:
+            return None
+        return items[0].get("link")
+    except Exception:
+        return None
+
+
+def _strip_lastfm(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return None
+    cleaned = text.split("Read more", 1)[0]
+    cleaned = _strip_html(cleaned)
+    return cleaned.strip()
+
+
+def _strip_html(text: str) -> str:
+    return re.sub(r"<[^>]+>", "", text or "")
+
+
+def _write_text_file(path: Path, text: str, source: str = "", translated: bool = False):
+    header = []
+    header.append(f"Source: {source}" if source else "Source: inconnue")
+    if translated:
+        header.append("Note: texte traduit automatiquement.")
+    header.append("")
+    full = "\n".join(header) + text.strip()
+    path.write_text(full, encoding="utf-8")
+
+
+def _translate_to_fr(text: str, source_lang: str, source: str) -> str:
+    if not OPENAI_API_KEY:
+        return text
+    try:
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+        payload = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": "Tu traduis en français de façon fidèle et naturelle."},
+                {"role": "user", "content": f"Texte source ({source_lang}, source {source}):\n{text}"},
+            ],
+            "temperature": 0.2,
+        }
+        res = requests.post(url, headers=headers, json=payload, timeout=20)
+        if res.status_code != 200:
+            return text
+        out = res.json()["choices"][0]["message"]["content"]
+        return out.strip()
+    except Exception:
+        return text
+
+
+def _download_image(url: str, dest: Path) -> bool:
+    try:
+        res = requests.get(url, stream=True, timeout=15)
+        if res.status_code != 200:
+            return False
+        res.raw.decode_content = True
+        img = Image.open(res.raw).convert("RGB")
+        img.save(dest, "JPEG", quality=90, optimize=True)
+        return True
+    except Exception:
+        return False
+
+
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=11000, debug=True)
