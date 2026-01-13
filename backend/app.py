@@ -126,6 +126,18 @@ def _init_db():
       year INTEGER,
       mtime INTEGER
     );
+    CREATE TABLE IF NOT EXISTS favourite (
+      id INTEGER PRIMARY KEY,
+      type TEXT NOT NULL,
+      key TEXT UNIQUE NOT NULL,
+      title TEXT,
+      subtitle TEXT,
+      artist TEXT,
+      album TEXT,
+      path TEXT,
+      playlist TEXT,
+      created_at INTEGER
+    );
     CREATE VIRTUAL TABLE IF NOT EXISTS track_fts
     USING fts5(title, artist, album, path, content='track', content_rowid='id');
     CREATE TRIGGER IF NOT EXISTS track_ai AFTER INSERT ON track BEGIN
@@ -148,6 +160,14 @@ def _init_db():
         _ensure_columns(conn, "track", {
             "composer": "TEXT",
             "work": "TEXT",
+        })
+        _ensure_columns(conn, "favourite", {
+            "subtitle": "TEXT",
+            "artist": "TEXT",
+            "album": "TEXT",
+            "path": "TEXT",
+            "playlist": "TEXT",
+            "created_at": "INTEGER",
         })
 
 
@@ -748,6 +768,7 @@ def library_summary():
         album["tracks"].sort(key=lambda x: (x.get("trackNo") or 0, x.get("title") or ""))
 
     playlists = _list_playlists()
+    favourites = _list_favourites()
     newmusic = sorted(
         [albums_map[a] for a in albums_map.keys()],
         key=lambda a: album_mtime.get(a["id"], 0),
@@ -767,7 +788,7 @@ def library_summary():
         "folders": [{"name": k, "count": v} for k, v in folders_map.items()],
         "playlists": playlists,
         "radios": [],
-        "favourites": [],
+        "favourites": favourites,
         "apps": [],
     }
     return ok(summary)
@@ -797,6 +818,63 @@ def playlists_list():
     return ok(_list_playlists())
 
 
+@app.get("/api/favourites")
+def favourites_list():
+    return ok(_list_favourites())
+
+
+@app.post("/api/favourites/add")
+def favourites_add():
+    data = request.get_json(silent=True) or {}
+    fav_type = (data.get("type") or "").strip() or "track"
+    path = (data.get("path") or "").strip()
+    title = (data.get("title") or "").strip()
+    artist = (data.get("artist") or "").strip()
+    album = (data.get("album") or "").strip()
+    playlist = (data.get("playlist") or "").strip()
+    subtitle = (data.get("subtitle") or "").strip()
+
+    if fav_type == "track" and not path:
+        return err("missing path")
+    if fav_type == "playlist" and not playlist:
+        return err("missing playlist")
+
+    key = _favourite_key(fav_type, path=path, artist=artist, album=album, playlist=playlist, title=title)
+    created_at = int(time.time())
+    with _db_connect() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO favourite
+            (type, key, title, subtitle, artist, album, path, playlist, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (fav_type, key, title, subtitle, artist, album, path, playlist, created_at),
+        )
+        conn.commit()
+    return ok({"key": key, "type": fav_type})
+
+
+@app.post("/api/favourites/remove")
+def favourites_remove():
+    data = request.get_json(silent=True) or {}
+    key = (data.get("key") or "").strip()
+    fav_type = (data.get("type") or "").strip()
+    path = (data.get("path") or "").strip()
+    artist = (data.get("artist") or "").strip()
+    album = (data.get("album") or "").strip()
+    playlist = (data.get("playlist") or "").strip()
+    title = (data.get("title") or "").strip()
+
+    if not key and fav_type:
+        key = _favourite_key(fav_type, path=path, artist=artist, album=album, playlist=playlist, title=title)
+    if not key:
+        return err("missing key")
+    with _db_connect() as conn:
+        cur = conn.execute("DELETE FROM favourite WHERE key = ?", (key,))
+        conn.commit()
+    return ok({"removed": cur.rowcount})
+
+
 @app.post("/api/playlists/create")
 def playlists_create():
     name = (request.args.get("name") or "").strip()
@@ -810,6 +888,36 @@ def playlists_create():
     if not p.exists():
         p.write_text("#EXTM3U\n", encoding="utf-8")
     return ok({"name": p.name})
+
+
+@app.post("/api/playlists/delete")
+def playlists_delete():
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return err("missing playlist name")
+    p = _playlist_path(name)
+    if not p.exists():
+        return err("playlist not found", 404)
+    p.unlink()
+    return ok({"deleted": p.name})
+
+
+@app.post("/api/playlists/rename")
+def playlists_rename():
+    data = request.get_json(silent=True) or {}
+    src = (data.get("from") or "").strip()
+    dst = (data.get("to") or "").strip()
+    if not src or not dst:
+        return err("missing from/to")
+    src_path = _playlist_path(src)
+    dst_path = _playlist_path(dst)
+    if not src_path.exists():
+        return err("playlist not found", 404)
+    if dst_path.exists():
+        return err("destination exists", 409)
+    src_path.rename(dst_path)
+    return ok({"name": dst_path.name})
 
 
 @app.post("/api/playlists/append")
@@ -830,6 +938,36 @@ def playlists_append():
             if path:
                 f.write(f"{path}\n")
     return ok({"name": p.name, "added": len(paths)})
+
+
+@app.post("/api/playlists/move")
+def playlists_move():
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    frm = data.get("from")
+    to = data.get("to")
+    if not name or frm is None or to is None:
+        return err("missing name/from/to")
+    p = _playlist_path(name)
+    if not p.exists():
+        return err("playlist not found", 404)
+    try:
+        lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+        header = [ln for ln in lines if ln.startswith("#")]
+        tracks = [ln for ln in lines if ln and not ln.startswith("#")]
+        frm = int(frm)
+        to = int(to)
+        if frm < 0 or frm >= len(tracks) or to < 0 or to >= len(tracks):
+            return err("index out of range")
+        item = tracks.pop(frm)
+        tracks.insert(to, item)
+        out = header + tracks
+        if header and not header[0].startswith("#EXTM3U"):
+            out.insert(0, "#EXTM3U")
+        p.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+        return ok({"name": p.name, "count": len(tracks)})
+    except Exception as e:
+        return err("move failed", 500, detail=str(e))
 
 
 @app.post("/api/playlists/remove")
@@ -1055,6 +1193,40 @@ def _list_playlists() -> List[Dict[str, Any]]:
         except Exception:
             items.append({"name": p.name, "tracks": 0})
     return items
+
+
+def _list_favourites() -> List[Dict[str, Any]]:
+    try:
+        with _db_connect() as conn:
+            rows = conn.execute(
+                "SELECT type, key, title, subtitle, artist, album, path, playlist, created_at FROM favourite ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def _favourite_key(
+    fav_type: str,
+    *,
+    path: str = "",
+    artist: str = "",
+    album: str = "",
+    playlist: str = "",
+    title: str = "",
+) -> str:
+    base = ""
+    if fav_type == "track":
+        base = path
+    elif fav_type == "album":
+        base = f"{artist}::{album}"
+    elif fav_type == "artist":
+        base = artist
+    elif fav_type == "playlist":
+        base = playlist or title
+    else:
+        base = title or path or playlist or f"{artist}::{album}"
+    return f"{fav_type}:{base}"
 
 
 def _find_doc_file(folder: Path, name: str, exts: List[str]) -> Optional[Path]:

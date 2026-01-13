@@ -2,7 +2,7 @@ import { card, coverEl, button, pill, listRow } from "../components/ui.js";
 import { AppConfig } from "../config.js";
 import { store } from "../store.js";
 import { formatTime, toast } from "../utils.js";
-import { queueRandomNext } from "../services/library.js";
+import { queueRandomNext, toggleTrackFavourite, fetchFavourites, showAddMenu } from "../services/library.js";
 
 export async function render(root){
   const st = store.get();
@@ -32,6 +32,8 @@ export async function render(root){
   }
   cover.style.marginTop = "6px";
 
+  const favs = st.library.favourites || [];
+  const isFav = tr?.path ? favs.some(f=>f.key === `track:${tr.path}`) : false;
   const meta = document.createElement("div");
   meta.innerHTML = `
     <div class="h1">${tr ? tr.title : "—"}</div>
@@ -45,7 +47,7 @@ export async function render(root){
       <button class="btn" id="npMix">Mix</button>
       <button class="btn" id="npRandomNext">Suivant aléatoire</button>
       <button class="btn" id="npAdd">Ajouter à une playlist</button>
-      <button class="btn" id="npFav">${tr?.fav ? "Retirer des favoris" : "Ajouter aux favoris"}</button>
+      <button class="btn" id="npFav">${isFav ? "Retirer des favoris" : "Ajouter aux favoris"}</button>
     </div>
   `;
 
@@ -92,8 +94,14 @@ export async function render(root){
       mixBtn.classList.toggle("is-active", !!next.player.random);
     });
   }
-  c.root.querySelector("#npAdd")?.addEventListener("click", ()=>toast("Démo : ajout playlist plus tard."));
-  c.root.querySelector("#npFav")?.addEventListener("click", ()=>toast("Démo : favoris plus tard."));
+  c.root.querySelector("#npAdd")?.addEventListener("click", (ev)=>{
+    if(!tr?.path) return;
+    showAddMenu(ev.currentTarget, {title: tr.title, paths: [tr.path]});
+  });
+  c.root.querySelector("#npFav")?.addEventListener("click", async ()=>{
+    await toggleTrackFavourite(tr);
+    await fetchFavourites();
+  });
 }
 
 function albumArtUrl(track, size){

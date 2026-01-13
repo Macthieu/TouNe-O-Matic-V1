@@ -97,6 +97,82 @@ export async function removeFromPlaylist(name, path){
   }
 }
 
+export async function moveInPlaylist(name, from, to){
+  try {
+    await postJson("/playlists/move", {name, from, to});
+  } catch {
+    toast("Erreur: déplacement playlist");
+  }
+}
+
+export async function renamePlaylist(from, to){
+  try {
+    await postJson("/playlists/rename", {from, to});
+    await refreshPlaylists();
+  } catch {
+    toast("Erreur: renommage playlist");
+  }
+}
+
+export async function deletePlaylist(name){
+  try {
+    await postJson("/playlists/delete", {name});
+    await refreshPlaylists();
+  } catch {
+    toast("Erreur: suppression playlist");
+  }
+}
+
+export async function fetchFavourites(){
+  if(AppConfig.transport !== "rest") return [];
+  try {
+    const res = await fetch(`${AppConfig.restBaseUrl}/favourites`);
+    const body = await res.json();
+    if(body?.ok && Array.isArray(body.data)){
+      store.set({ library: { favourites: body.data } });
+      return body.data;
+    }
+  } catch {}
+  return [];
+}
+
+export async function addFavourite(payload){
+  try {
+    await postJson("/favourites/add", payload);
+    await fetchFavourites();
+  } catch {
+    toast("Erreur: ajout favori");
+  }
+}
+
+export async function removeFavourite(payload){
+  try {
+    await postJson("/favourites/remove", payload);
+    await fetchFavourites();
+  } catch {
+    toast("Erreur: suppression favori");
+  }
+}
+
+export async function toggleTrackFavourite(track){
+  if(!track?.path) return;
+  const favs = store.get().library.favourites || [];
+  const key = `track:${track.path}`;
+  const exists = favs.some(f=>f.key === key);
+  if(exists){
+    await removeFavourite({key});
+  } else {
+    await addFavourite({
+      type: "track",
+      path: track.path,
+      title: track.title || "",
+      artist: track.artist || "",
+      album: track.album || "",
+      subtitle: `${track.artist || "—"} • ${track.album || "—"}`,
+    });
+  }
+}
+
 export function showAddMenu(targetEl, {title, paths}){
   if(!paths || !paths.length){
     toast("Aucun titre à ajouter");

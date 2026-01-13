@@ -3,7 +3,7 @@ import { AppConfig } from "../config.js";
 import { store } from "../store.js";
 import { formatTime, toast } from "../utils.js";
 import { navigate } from "../router.js";
-import { playPaths, showAddMenu, playPlaylist, queuePlaylist, removeFromPlaylist } from "../services/library.js";
+import { playPaths, showAddMenu, playPlaylist, queuePlaylist, removeFromPlaylist, moveInPlaylist, renamePlaylist, deletePlaylist, createPlaylist } from "../services/library.js";
 
 export async function render(root, params){
   const name = params?.get("name") || "";
@@ -13,6 +13,16 @@ export async function render(root, params){
   }
 
   const c = card({ title:"Playlists", subtitle:"Créer / renommer / éditer (UI démo)" });
+  const actions = document.createElement("div");
+  actions.style.display = "flex";
+  actions.style.gap = "8px";
+  actions.append(button("Nouvelle playlist", {onClick: async ()=>{
+    const name = window.prompt("Nom de la nouvelle playlist");
+    if(!name) return;
+    await createPlaylist(name);
+  }}));
+  c.body.append(actions);
+
   const list = document.createElement("div");
   list.className = "list";
 
@@ -54,6 +64,17 @@ async function renderPlaylistDetail(root, name){
   header.append(
     button("Lecture", {onClick: async ()=>playPlaylist(name)}),
     button("Ajouter à la file", {onClick: async ()=>queuePlaylist(name)}),
+    button("Renommer", {onClick: async ()=>{
+      const next = window.prompt("Nouveau nom", name);
+      if(!next || next === name) return;
+      await renamePlaylist(name, next);
+      navigate("playlists", new URLSearchParams({name: next.endsWith(".m3u") ? next : `${next}.m3u`}));
+    }}),
+    button("Supprimer", {kind:"danger", onClick: async ()=>{
+      if(!window.confirm("Supprimer cette playlist ?")) return;
+      await deletePlaylist(name);
+      navigate("playlists");
+    }}),
   );
   c.body.append(header);
 
@@ -67,6 +88,8 @@ async function renderPlaylistDetail(root, name){
         subtitle: `${t.artist || "—"} • ${t.album || "—"}`,
         left: coverEl("sm", t.title || ""),
         right: actionBtn("▶", "Lire", (ev)=>{ev.stopPropagation(); playPaths([t.path].filter(Boolean));}),
+        draggable: true,
+        data: {i: idx}
       });
       const addBtn = actionBtn("+", "Ajouter", (ev)=>{ev.stopPropagation(); showAddMenu(ev.currentTarget, {title: t.title, paths:[t.path].filter(Boolean)});});
       const delBtn = actionBtn("🗑", "Supprimer", async (ev)=>{
@@ -76,6 +99,28 @@ async function renderPlaylistDetail(root, name){
       });
       row.append(addBtn);
       row.append(delBtn);
+      row.addEventListener("dragstart", ev=>{
+        ev.dataTransfer.setData("text/plain", String(idx));
+        ev.dataTransfer.effectAllowed = "move";
+        row.classList.add("dragging");
+      });
+      row.addEventListener("dragend", ()=>row.classList.remove("dragging"));
+      row.addEventListener("dragover", ev=>{
+        ev.preventDefault();
+        ev.dataTransfer.dropEffect = "move";
+        row.style.outline = "2px solid rgba(124,58,237,.35)";
+      });
+      row.addEventListener("dragleave", ()=>row.style.outline = "");
+      row.addEventListener("drop", async ev=>{
+        ev.preventDefault();
+        row.style.outline = "";
+        const from = Number(ev.dataTransfer.getData("text/plain"));
+        const to = idx;
+        if(Number.isFinite(from) && from!==to){
+          await moveInPlaylist(name, from, to);
+          await renderPlaylistDetail(root, name);
+        }
+      });
       list.append(row);
     });
   }
