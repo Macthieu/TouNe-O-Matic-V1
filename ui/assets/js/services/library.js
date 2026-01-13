@@ -55,6 +55,15 @@ export async function queuePlaylist(name){
   }
 }
 
+export async function playRadio(url, {replace=true, play=true} = {}){
+  if(!url) return;
+  try {
+    await postJson("/radio/play", {url, replace, play});
+  } catch (e){
+    toast("Erreur: lecture radio");
+  }
+}
+
 export async function queueRandomNext(){
   if(AppConfig.transport !== "rest") return;
   try {

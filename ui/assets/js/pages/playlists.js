@@ -5,6 +5,10 @@ import { formatTime, toast } from "../utils.js";
 import { navigate } from "../router.js";
 import { playPaths, showAddMenu, playPlaylist, queuePlaylist, removeFromPlaylist, moveInPlaylist, renamePlaylist, deletePlaylist, createPlaylist } from "../services/library.js";
 
+const playlistCoverCache = new Map();
+const playlistCoverInFlight = new Map();
+let lastPlaylistSig = "";
+
 export async function render(root, params){
   const name = params?.get("name") || "";
   if(name){
@@ -21,14 +25,32 @@ export async function render(root, params){
     if(!name) return;
     await createPlaylist(name);
   }}));
+  actions.append(button("Rafraîchir pochettes", {onClick: ()=>{
+    playlistCoverCache.clear();
+    playlistCoverInFlight.clear();
+    lastPlaylistSig = "";
+    renderList();
+  }}));
   c.body.append(actions);
 
   const list = document.createElement("div");
   list.className = "list";
   function renderList(){
+    const items = store.get().library.playlists || [];
+    const sig = items.map(p=>`${p.name}:${p.tracks}`).join("|");
+    if(sig === lastPlaylistSig && list.childElementCount){
+      return;
+    }
+    lastPlaylistSig = sig;
     list.innerHTML = "";
-    for(const p of store.get().library.playlists){
+    for(const p of items){
       const cover = coverEl("sm", p.name);
+      const cached = playlistCoverCache.get(p.name);
+      if(cached){
+        cover.style.backgroundImage = `url("${cached}")`;
+        cover.style.backgroundSize = "cover";
+        cover.style.backgroundPosition = "center";
+      }
       hydratePlaylistCover(cover, p.name);
       const actions = document.createElement("div");
       actions.className = "row__actions";
@@ -182,14 +204,32 @@ async function fetchPlaylistInfo(name){
 }
 
 async function hydratePlaylistCover(coverEl, name){
-  const tracks = await fetchPlaylistInfo(name);
-  const first = tracks[0];
-  if(!first?.artist || !first?.album) return;
-  const url = new URL(`${AppConfig.restBaseUrl}/docs/album/art`, window.location.origin);
-  url.searchParams.set("artist", first.artist);
-  url.searchParams.set("album", first.album);
-  url.searchParams.set("size", "140");
-  coverEl.style.backgroundImage = `url("${url.toString()}")`;
-  coverEl.style.backgroundSize = "cover";
-  coverEl.style.backgroundPosition = "center";
+  if(playlistCoverCache.has(name)){
+    return;
+  }
+  if(playlistCoverInFlight.has(name)){
+    return;
+  }
+  const inFlight = (async ()=>{
+    const tracks = await fetchPlaylistInfo(name);
+    const first = tracks[0];
+    if(!first?.artist || !first?.album){
+      playlistCoverInFlight.delete(name);
+      return;
+    }
+    const url = new URL(`${AppConfig.restBaseUrl}/docs/album/art`, window.location.origin);
+    url.searchParams.set("artist", first.artist);
+    url.searchParams.set("album", first.album);
+    url.searchParams.set("size", "140");
+    const artUrl = url.toString();
+    playlistCoverCache.set(name, artUrl);
+    if(coverEl && coverEl.isConnected){
+      coverEl.style.backgroundImage = `url("${artUrl}")`;
+      coverEl.style.backgroundSize = "cover";
+      coverEl.style.backgroundPosition = "center";
+    }
+    playlistCoverInFlight.delete(name);
+  })();
+  playlistCoverInFlight.set(name, inFlight);
+  await inFlight;
 }

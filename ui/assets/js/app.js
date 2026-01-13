@@ -104,9 +104,14 @@ $("#btnFullscreen")?.addEventListener("click", async ()=>{
 
 // Highlight active nav
 function syncNav(route){
+  const params = new URLSearchParams(location.hash.split("?")[1] || "");
+  let view = params.get("view") || "";
+  if(route === "favourites" && !view) view = "tracks";
   $$(".nav-item").forEach(a=>{
     const r = a.getAttribute("data-route");
-    if(r === route) a.setAttribute("aria-current","page");
+    const v = a.getAttribute("data-view") || "";
+    const matches = r === route && (!v || v === view);
+    if(matches) a.setAttribute("aria-current","page");
     else a.removeAttribute("aria-current");
   });
 }

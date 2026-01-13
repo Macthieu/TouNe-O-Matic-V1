@@ -36,6 +36,7 @@ GOOGLE_CSE_CX = os.environ.get("GOOGLE_CSE_CX", "")
 PHOTO_SOURCES_FILE = DOCS_ROOT / "Photos d'artiste" / "_sources.json"
 SNAPCAST_RPC_URL = os.environ.get("SNAPCAST_RPC_URL", "http://127.0.0.1:1780/jsonrpc")
 SNAPCAST_STATE_FILE = Path(os.environ.get("SNAPCAST_STATE_FILE", "/srv/toune/data/snapcast.json"))
+RADIO_BROWSER_URL = os.environ.get("RADIO_BROWSER_URL", "https://de1.api.radio-browser.info")
 
 SCAN_STATE = {
     "running": False,
@@ -244,6 +245,34 @@ def _log_event(state: Dict[str, Any], level: str, message: str, **data):
     state.setdefault("log", []).append(entry)
     if len(state["log"]) > 500:
         state["log"] = state["log"][-500:]
+
+
+def _radio_api_get(path: str, params: Optional[Dict[str, Any]] = None) -> Optional[Any]:
+    base = RADIO_BROWSER_URL.rstrip("/")
+    url = f"{base}{path}"
+    try:
+        res = requests.get(url, params=params or {}, timeout=10)
+        if res.status_code != 200:
+            return None
+        return res.json()
+    except Exception:
+        return None
+
+
+def _radio_station_payload(item: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "uuid": item.get("stationuuid") or "",
+        "name": item.get("name") or "",
+        "url": item.get("url_resolved") or item.get("url") or "",
+        "favicon": item.get("favicon") or "",
+        "country": item.get("country") or "",
+        "state": item.get("state") or "",
+        "language": item.get("language") or "",
+        "tags": item.get("tags") or "",
+        "codec": item.get("codec") or "",
+        "bitrate": item.get("bitrate") or 0,
+        "homepage": item.get("homepage") or "",
+    }
 
 
 def _snapcast_rpc(method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -716,6 +745,105 @@ def mpd_queue():
         return err("queue failed", 500, detail=str(e))
 
 
+@app.get("/api/radio/tags")
+def radio_tags():
+    limit = int(request.args.get("limit", "50"))
+    data = _radio_api_get("/json/tags", {
+        "order": "stationcount",
+        "reverse": "true",
+        "limit": max(1, min(limit, 200)),
+    })
+    if data is None:
+        return err("radio tags unavailable", 502)
+    tags = [{"name": r.get("name") or "", "count": r.get("stationcount") or 0} for r in data]
+    return ok(tags)
+
+
+@app.get("/api/radio/countries")
+def radio_countries():
+    limit = int(request.args.get("limit", "80"))
+    data = _radio_api_get("/json/countries", {
+        "order": "stationcount",
+        "reverse": "true",
+        "limit": max(1, min(limit, 250)),
+    })
+    if data is None:
+        return err("radio countries unavailable", 502)
+    countries = [{
+        "name": r.get("name") or "",
+        "code": r.get("iso_3166_1") or "",
+        "count": r.get("stationcount") or 0,
+    } for r in data]
+    return ok(countries)
+
+
+@app.get("/api/radio/top")
+def radio_top():
+    limit = int(request.args.get("limit", "50"))
+    by = (request.args.get("by") or "click").lower()
+    if by not in ("click", "vote"):
+        return err("invalid ?by= (click|vote)")
+    path = "/json/stations/topclick" if by == "click" else "/json/stations/topvote"
+    data = _radio_api_get(path, {"limit": max(1, min(limit, 200)), "hidebroken": "true"})
+    if data is None:
+        return err("radio top unavailable", 502)
+    return ok([_radio_station_payload(r) for r in data])
+
+
+@app.get("/api/radio/search")
+def radio_search():
+    q = (request.args.get("q") or "").strip()
+    tag = (request.args.get("tag") or "").strip()
+    country = (request.args.get("country") or "").strip()
+    city = (request.args.get("city") or "").strip()
+    state = (request.args.get("state") or "").strip()
+    limit = int(request.args.get("limit", "50"))
+    if not q and not tag and not country and not city and not state:
+        return err("missing ?q= or ?tag= or ?country= or ?city= or ?state=")
+    params: Dict[str, Any] = {
+        "limit": max(1, min(limit, 200)),
+        "hidebroken": "true",
+        "order": "clickcount",
+        "reverse": "true",
+    }
+    if q:
+        params["name"] = q
+    if tag:
+        params["tag"] = tag
+    if country:
+        params["country"] = country
+    if city:
+        params["city"] = city
+    if state:
+        params["state"] = state
+    data = _radio_api_get("/json/stations/search", params)
+    if data is None:
+        return err("radio search unavailable", 502)
+    return ok([_radio_station_payload(r) for r in data])
+
+
+@app.post("/api/radio/play")
+def radio_play():
+    data = request.get_json(silent=True) or {}
+    url = data.get("url") or request.args.get("url")
+    if not url:
+        return err("missing url")
+    replace = data.get("replace")
+    play = data.get("play")
+    replace = True if replace is None else bool(replace)
+    play = True if play is None else bool(play)
+    try:
+        with mpd_client() as c:
+            if replace:
+                c.clear()
+            c.add(url)
+            if play:
+                c.play()
+        return ok({"url": url, "replace": replace, "play": play})
+    except Exception as e:
+        return err("radio play failed", 500, detail=str(e))
+
+
 @app.get("/api/library/search")
 def library_search():
     # ?q=blind melon&limit=50
@@ -973,6 +1101,8 @@ def favourites_add():
         return err("missing path")
     if fav_type == "playlist" and not playlist:
         return err("missing playlist")
+    if fav_type == "radio" and not (path or title):
+        return err("missing url or title")
 
     key = _favourite_key(fav_type, path=path, artist=artist, album=album, playlist=playlist, title=title)
     created_at = int(time.time())
@@ -1359,6 +1489,8 @@ def _favourite_key(
         base = artist
     elif fav_type == "playlist":
         base = playlist or title
+    elif fav_type == "radio":
+        base = path or title
     else:
         base = title or path or playlist or f"{artist}::{album}"
     return f"{fav_type}:{base}"

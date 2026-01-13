@@ -1,21 +1,28 @@
 import { card, listRow, coverEl, button } from "../components/ui.js";
 import { AppConfig } from "../config.js";
 import { store } from "../store.js";
-import { playPaths, playPlaylist, removeFavourite, fetchFavourites } from "../services/library.js";
+import { playPaths, playPlaylist, playRadio, removeFavourite, fetchFavourites } from "../services/library.js";
+import { navigate } from "../router.js";
 
 export async function render(root){
-  const c = card({ title:"Favoris", subtitle:"Pistes / playlists" });
+  const params = new URLSearchParams(location.hash.split("?")[1] || "");
+  const view = params.get("view") || "tracks";
+  const isRadioView = view === "radio";
+  const c = card({ title:"Favoris", subtitle: isRadioView ? "Radios" : "Pistes / playlists" });
   const list = document.createElement("div");
   list.className = "list";
 
   function renderList(){
     const favs = store.get().library.favourites || [];
+    const filtered = isRadioView
+      ? favs.filter(f=>f.type === "radio")
+      : favs.filter(f=>f.type !== "radio");
     list.innerHTML = "";
-    if(!favs.length){
-      list.innerHTML = '<div class="muted">Aucun favori.</div>';
+    if(!filtered.length){
+      list.innerHTML = `<div class="muted">Aucun favori${isRadioView ? " radio" : ""}.</div>`;
       return;
     }
-    for(const f of favs){
+    for(const f of filtered){
       const cover = coverEl("sm", f.title || "");
       if(f.type === "track" && f.artist && f.album){
         const url = new URL(`${AppConfig.restBaseUrl}/docs/album/art`, window.location.origin);
@@ -23,6 +30,10 @@ export async function render(root){
         url.searchParams.set("album", f.album);
         url.searchParams.set("size", "120");
         cover.style.backgroundImage = `url("${url.toString()}")`;
+        cover.style.backgroundSize = "cover";
+        cover.style.backgroundPosition = "center";
+      } else if(f.type === "radio" && f.album){
+        cover.style.backgroundImage = `url("${f.album}")`;
         cover.style.backgroundSize = "cover";
         cover.style.backgroundPosition = "center";
       } else if(f.type === "playlist" && f.playlist){
@@ -34,16 +45,19 @@ export async function render(root){
           playPlaylist(f.playlist);
         } else if(f.type === "track" && f.path){
           playPaths([f.path]);
+        } else if(f.type === "radio" && f.path){
+          playRadio(f.path, {replace: true, play: true});
         }
       }});
-      const delBtn = button("Retirer", {onClick: async (ev)=>{
+      const delBtn = button("Supprimer", {onClick: async (ev)=>{
         ev.stopPropagation();
         await removeFavourite({key: f.key});
         await fetchFavourites();
       }});
+      const subtitle = f.subtitle || f.playlist || (f.type === "radio" ? "Radio" : "");
       list.append(listRow({
         title: f.title || "—",
-        subtitle: f.subtitle || f.playlist || "",
+        subtitle,
         left: cover,
         right: (()=>{ const wrap = document.createElement("div"); wrap.className = "row__actions"; wrap.append(openBtn, delBtn); return wrap; })(),
       }));
