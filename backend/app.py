@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 import hashlib
+import shutil
 import random
 import sqlite3
 import threading
@@ -1178,6 +1179,9 @@ def _fetch_artist_docs(name: str, force: bool, force_photo: bool = False):
         if _is_placeholder_file(photo_path):
             _log_event(DOCS_STATE, "warn", "Photo placeholder détectée, relance", artist=name)
             photo_ok = False
+        elif _is_album_cover_copy(name, photo_path):
+            _log_event(DOCS_STATE, "warn", "Photo fallback détectée, relance", artist=name)
+            photo_ok = False
         else:
             _log_event(DOCS_STATE, "info", "Photo déjà présente", artist=name)
     if (not photo_ok) or force or force_photo:
@@ -1187,8 +1191,15 @@ def _fetch_artist_docs(name: str, force: bool, force_photo: bool = False):
                 _log_event(DOCS_STATE, "info", "Photo enregistrée", artist=name, source=source)
             else:
                 _log_event(DOCS_STATE, "warn", "Photo download échouée", artist=name, source=source)
+                if _fallback_artist_photo_from_albums(name, photo_path):
+                    _log_event(DOCS_STATE, "info", "Photo fallback depuis album", artist=name, source="album-cover")
+                else:
+                    _log_event(DOCS_STATE, "warn", "Photo introuvable", artist=name)
         else:
-            _log_event(DOCS_STATE, "warn", "Photo introuvable", artist=name)
+            if _fallback_artist_photo_from_albums(name, photo_path):
+                _log_event(DOCS_STATE, "info", "Photo fallback depuis album", artist=name, source="album-cover")
+            else:
+                _log_event(DOCS_STATE, "warn", "Photo introuvable", artist=name)
 
 
 def _fetch_album_docs(artist: str, album: str, force: bool):
@@ -1268,6 +1279,12 @@ def _get_artist_photo(name: str) -> Tuple[Optional[str], str]:
         url = _wikipedia_image(simple, "fr") or _wikipedia_image(simple, "en")
         if url:
             return url, "wikipedia"
+        url = _wikidata_artist_image(simple)
+        if url:
+            return url, "wikidata"
+        url = _lastfm_artist_image(simple, autocorrect=True)
+        if url:
+            return url, "lastfm"
     url = _google_artist_image(name)
     if url:
         return url, "google"
@@ -1340,7 +1357,7 @@ def _dir_empty(path: Path) -> bool:
 def _wikipedia_summary(title: str, lang: str) -> Optional[str]:
     try:
         url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(title)}"
-        res = requests.get(url, timeout=10)
+        res = _http_get(url, timeout=10)
         if res.status_code != 200:
             return None
         data = res.json()
@@ -1377,7 +1394,7 @@ def _wikipedia_page_image(title: str, lang: str) -> Optional[str]:
         "format": "json",
         "redirects": 1,
     }
-    res = requests.get(url, params=params, timeout=10)
+    res = _http_get(url, params=params, timeout=10)
     if res.status_code != 200:
         return None
     pages = res.json().get("query", {}).get("pages", {})
@@ -1390,7 +1407,7 @@ def _wikipedia_page_image(title: str, lang: str) -> Optional[str]:
 
 def _wikipedia_summary_image(title: str, lang: str) -> Optional[str]:
     url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(title)}"
-    res = requests.get(url, timeout=10)
+    res = _http_get(url, timeout=10)
     if res.status_code != 200:
         return None
     data = res.json()
@@ -1406,7 +1423,7 @@ def _wikipedia_search_title(query: str, lang: str) -> Optional[str]:
         "namespace": 0,
         "format": "json",
     }
-    res = requests.get(url, params=params, timeout=10)
+    res = _http_get(url, params=params, timeout=10)
     if res.status_code != 200:
         return None
     data = res.json()
@@ -1437,7 +1454,7 @@ def _wikidata_search_entity(query: str, lang: str) -> Optional[str]:
         "format": "json",
         "limit": 1,
     }
-    res = requests.get(url, params=params, timeout=10)
+    res = _http_get(url, params=params, timeout=10)
     if res.status_code != 200:
         return None
     results = res.json().get("search", [])
@@ -1454,7 +1471,7 @@ def _wikidata_entity_image(entity_id: str) -> Optional[str]:
         "props": "claims",
         "format": "json",
     }
-    res = requests.get(url, params=params, timeout=10)
+    res = _http_get(url, params=params, timeout=10)
     if res.status_code != 200:
         return None
     entity = res.json().get("entities", {}).get(entity_id, {})
@@ -1469,6 +1486,73 @@ def _wikidata_entity_image(entity_id: str) -> Optional[str]:
     return f"https://commons.wikimedia.org/wiki/Special:FilePath/{requests.utils.quote(safe)}?width=800"
 
 
+def _fallback_artist_photo_from_albums(artist: str, dest_path: Path) -> bool:
+    try:
+        with _db_connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT album FROM track WHERE artist = ? AND album IS NOT NULL",
+                (artist,),
+            ).fetchall()
+        albums = [r["album"] for r in rows]
+        if not albums:
+            return False
+        for album in albums:
+            cover = _find_doc_file(DOCS_ROOT / "Pochettes", album, [".jpg", ".jpeg", ".png"])
+            if cover and cover.exists():
+                shutil.copyfile(cover, dest_path)
+                return True
+            album_dir = MUSIC_ROOT / artist / album
+            for name in ("cover.jpg", "folder.jpg", "cover.png", "folder.png"):
+                p = album_dir / name
+                if p.exists():
+                    shutil.copyfile(p, dest_path)
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def _is_album_cover_copy(artist: str, photo_path: Path) -> bool:
+    try:
+        if not photo_path.exists():
+            return False
+        photo_size = photo_path.stat().st_size
+        photo_hash = _file_md5(photo_path)
+        if not photo_hash:
+            return False
+        with _db_connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT album FROM track WHERE artist = ? AND album IS NOT NULL",
+                (artist,),
+            ).fetchall()
+        albums = [r["album"] for r in rows]
+        for album in albums:
+            cover = _find_doc_file(DOCS_ROOT / "Pochettes", album, [".jpg", ".jpeg", ".png"])
+            if cover and cover.exists():
+                if cover.stat().st_size == photo_size and _file_md5(cover) == photo_hash:
+                    return True
+            album_dir = MUSIC_ROOT / artist / album
+            for name in ("cover.jpg", "folder.jpg", "cover.png", "folder.png"):
+                p = album_dir / name
+                if p.exists() and p.stat().st_size == photo_size:
+                    if _file_md5(p) == photo_hash:
+                        return True
+    except Exception:
+        return False
+    return False
+
+
+def _file_md5(path: Path) -> Optional[str]:
+    try:
+        h = hashlib.md5()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
 def _lastfm_artist_bio(name: str, lang: str = "fr") -> Optional[str]:
     if not LASTFM_API_KEY:
         return None
@@ -1481,7 +1565,7 @@ def _lastfm_artist_bio(name: str, lang: str = "fr") -> Optional[str]:
             "format": "json",
             "lang": lang,
         }
-        res = requests.get(url, params=params, timeout=10)
+        res = _http_get(url, params=params, timeout=10)
         if res.status_code != 200:
             return None
         bio = res.json().get("artist", {}).get("bio", {}).get("content")
@@ -1503,7 +1587,7 @@ def _lastfm_artist_image(name: str, autocorrect: bool = False) -> Optional[str]:
         }
         if autocorrect:
             params["autocorrect"] = 1
-        res = requests.get(url, params=params, timeout=10)
+        res = _http_get(url, params=params, timeout=10)
         if res.status_code != 200:
             return None
         images = res.json().get("artist", {}).get("image", [])
@@ -1531,7 +1615,7 @@ def _lastfm_album_review(artist: str, album: str, lang: str = "fr") -> Optional[
             "format": "json",
             "lang": lang,
         }
-        res = requests.get(url, params=params, timeout=10)
+        res = _http_get(url, params=params, timeout=10)
         if res.status_code != 200:
             return None
         wiki = res.json().get("album", {}).get("wiki", {}).get("content")
@@ -1546,7 +1630,7 @@ def _lastfm_album_image(artist: str, album: str) -> Optional[str]:
     try:
         url = "https://ws.audioscrobbler.com/2.0/"
         params = {"method": "album.getinfo", "artist": artist, "album": album, "api_key": LASTFM_API_KEY, "format": "json"}
-        res = requests.get(url, params=params, timeout=10)
+        res = _http_get(url, params=params, timeout=10)
         if res.status_code != 200:
             return None
         images = res.json().get("album", {}).get("image", [])
@@ -1566,11 +1650,17 @@ def _discogs_search(query: str, type_: str):
         return None
     url = "https://api.discogs.com/database/search"
     params = {"q": query, "type": type_, "token": DISCOGS_TOKEN}
-    res = requests.get(url, params=params, timeout=10)
+    res = _http_get(url, params=params, timeout=10)
     if res.status_code != 200:
         return None
     data = res.json().get("results", [])
     return data[0] if data else None
+
+
+def _http_get(url: str, **kwargs) -> requests.Response:
+    headers = kwargs.pop("headers", {}) or {}
+    headers.setdefault("User-Agent", "Toune-o-matic/1.0 (+https://localhost)")
+    return requests.get(url, headers=headers, **kwargs)
 
 
 def _discogs_artist_profile(name: str) -> Optional[str]:
