@@ -118,6 +118,36 @@ export async function render(root){
   docs.body.append(docsWrap);
   root.append(docs.root);
 
+  const multi = card({ title:"Multiroom (Snapcast)", subtitle:"Latence clients (ms)" });
+  const multiWrap = document.createElement("div");
+  multiWrap.style.display = "grid";
+  multiWrap.style.gap = "10px";
+  const multiRow = document.createElement("div");
+  multiRow.style.display = "grid";
+  multiRow.style.gridTemplateColumns = "1fr auto";
+  multiRow.style.alignItems = "center";
+  multiRow.style.gap = "12px";
+  const latencyLabel = document.createElement("div");
+  latencyLabel.className = "muted small";
+  latencyLabel.textContent = "Latence: — ms";
+  const latencyRange = document.createElement("input");
+  latencyRange.type = "range";
+  latencyRange.min = "50";
+  latencyRange.max = "5000";
+  latencyRange.step = "50";
+  latencyRange.value = "1000";
+  const latencyApply = button("Appliquer", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    await applyLatency(Number(latencyRange.value || 0));
+  }});
+  const latencyNote = document.createElement("div");
+  latencyNote.className = "muted small";
+  latencyNote.textContent = "Appliqué aux clients Snapcast connectés.";
+  multiRow.append(latencyRange, latencyApply);
+  multiWrap.append(latencyLabel, multiRow, latencyNote);
+  multi.body.append(multiWrap);
+  root.append(multi.root);
+
   const pl = card({ title:"Paramètres lecteur", subtitle:"Crossfade, replay gain, etc. (UI only)" });
   const list2 = document.createElement("div");
   list2.className = "list";
@@ -187,13 +217,56 @@ export async function render(root){
     }
   }
 
+  async function refreshLatency(){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/snapcast/latency`);
+      const body = await res.json();
+      if(body?.ok){
+        const ms = body.data?.latency_ms;
+        if(typeof ms === "number"){
+          latencyRange.value = String(ms);
+          latencyLabel.textContent = `Latence: ${ms} ms`;
+        } else {
+          latencyLabel.textContent = "Latence: — ms";
+        }
+        if(!body.data?.clients){
+          latencyNote.textContent = "Aucun client Snapcast connecté.";
+        } else {
+          latencyNote.textContent = `Clients connectés: ${body.data.clients}`;
+        }
+      }
+    } catch {}
+  }
+
+  async function applyLatency(ms){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/snapcast/latency`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({latency_ms: ms})
+      });
+      const body = await res.json();
+      if(body?.ok){
+        latencyLabel.textContent = `Latence: ${body.data.latency_ms} ms`;
+        toast("Latence Snapcast appliquée");
+      } else {
+        toast(body?.error || "Erreur Snapcast");
+      }
+    } catch {
+      toast("Erreur Snapcast");
+    }
+  }
+
   async function startScan(){
     if(AppConfig.transport !== "rest") return;
     try {
       await fetch(`${AppConfig.restBaseUrl}/library/scan`, {method: "POST"});
     } catch {}
-    await refreshStatus();
-  }
+  await refreshStatus();
+  await refreshLatency();
+}
 
   async function fetchStatus(){
     if(AppConfig.transport !== "rest") return null;

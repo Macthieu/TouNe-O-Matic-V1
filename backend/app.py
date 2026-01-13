@@ -34,6 +34,8 @@ DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN", "")
 GOOGLE_CSE_API_KEY = os.environ.get("GOOGLE_CSE_API_KEY", "")
 GOOGLE_CSE_CX = os.environ.get("GOOGLE_CSE_CX", "")
 PHOTO_SOURCES_FILE = DOCS_ROOT / "Photos d'artiste" / "_sources.json"
+SNAPCAST_RPC_URL = os.environ.get("SNAPCAST_RPC_URL", "http://127.0.0.1:1780/jsonrpc")
+SNAPCAST_STATE_FILE = Path(os.environ.get("SNAPCAST_STATE_FILE", "/srv/toune/data/snapcast.json"))
 
 SCAN_STATE = {
     "running": False,
@@ -242,6 +244,49 @@ def _log_event(state: Dict[str, Any], level: str, message: str, **data):
     state.setdefault("log", []).append(entry)
     if len(state["log"]) > 500:
         state["log"] = state["log"][-500:]
+
+
+def _snapcast_rpc(method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = {"id": 1, "jsonrpc": "2.0", "method": method}
+    if params:
+        payload["params"] = params
+    res = requests.post(SNAPCAST_RPC_URL, json=payload, timeout=3)
+    res.raise_for_status()
+    body = res.json()
+    if "error" in body:
+        raise RuntimeError(body["error"])
+    return body.get("result", {})
+
+
+def _snapcast_clients() -> Tuple[List[str], Dict[str, Any]]:
+    result = _snapcast_rpc("Server.GetStatus")
+    server = result.get("server", {})
+    clients = server.get("clients", {}) or {}
+    ids: List[str] = []
+    for group in server.get("groups", []) or []:
+        for cid in group.get("clients", []) or []:
+            if cid not in ids:
+                ids.append(cid)
+    if not ids:
+        ids = list(clients.keys())
+    return ids, clients
+
+
+def _snapcast_load_state() -> Dict[str, Any]:
+    try:
+        if SNAPCAST_STATE_FILE.exists():
+            return json.loads(SNAPCAST_STATE_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+
+def _snapcast_save_state(data: Dict[str, Any]) -> None:
+    try:
+        SNAPCAST_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SNAPCAST_STATE_FILE.write_text(json.dumps(data, indent=2))
+    except Exception:
+        pass
 
 
 def _safe_name(name: str) -> str:
@@ -654,6 +699,43 @@ def library_search():
         return ok(rows, count=len(rows))
     except Exception as e:
         return err("search failed", 500, detail=str(e))
+
+
+@app.get("/api/snapcast/latency")
+def snapcast_latency_get():
+    try:
+        ids, clients = _snapcast_clients()
+        latency = None
+        for cid in ids:
+            cfg = clients.get(cid, {}).get("config") or {}
+            if "latency" in cfg:
+                latency = cfg["latency"]
+                break
+        if latency is None:
+            latency = _snapcast_load_state().get("latency_ms")
+        return ok({"latency_ms": latency, "clients": len(ids)})
+    except Exception as e:
+        return err("snapcast status failed", 500, detail=str(e))
+
+
+@app.post("/api/snapcast/latency")
+def snapcast_latency_set():
+    body = request.get_json(silent=True) or {}
+    try:
+        latency = int(body.get("latency_ms", 0))
+    except Exception:
+        return err("invalid latency_ms", 400)
+    latency = max(50, min(5000, latency))
+    try:
+        ids, _ = _snapcast_clients()
+        if not ids:
+            return err("no snapcast clients connected", 404)
+        for cid in ids:
+            _snapcast_rpc("Client.SetConfig", {"id": cid, "config": {"latency": latency}})
+        _snapcast_save_state({"latency_ms": latency})
+        return ok({"latency_ms": latency, "clients": len(ids)})
+    except Exception as e:
+        return err("snapcast update failed", 500, detail=str(e))
 
 
 @app.post("/api/library/queue/random-next")
