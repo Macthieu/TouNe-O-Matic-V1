@@ -358,6 +358,15 @@ function renderQueuePane(p){
       </div>
       <div class="qrow__right muted">${formatTime(t.duration || 0)}</div>
     `;
+    const cover = row.querySelector(".qrow__cover");
+    if(cover){
+      const art = albumArtUrl(t, 120);
+      if(art){
+        cover.style.backgroundImage = `url("${art}")`;
+        cover.style.backgroundSize = "cover";
+        cover.style.backgroundPosition = "center";
+      }
+    }
     row.addEventListener("click", ()=>mpd.playAt(i));
     list.appendChild(row);
   });
@@ -425,6 +434,15 @@ function renderQueueSheet(p){
       </div>
       <div class="pill">${i===p.index ? "▶" : String(i+1)}</div>
     `;
+    const cover = row.querySelector(".cover");
+    if(cover){
+      const art = albumArtUrl(t, 120);
+      if(art){
+        cover.style.backgroundImage = `url("${art}")`;
+        cover.style.backgroundSize = "cover";
+        cover.style.backgroundPosition = "center";
+      }
+    }
     row.addEventListener("click", async ()=>{
       await mpd.playAt(i);
       toast("Lecture: " + t.title);

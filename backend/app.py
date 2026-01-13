@@ -856,6 +856,54 @@ def playlists_queue():
         return err("queue playlist failed", 500, detail=str(e))
 
 
+@app.get("/api/playlists/info")
+def playlists_info():
+    name = request.args.get("name", "")
+    if not name:
+        return err("missing ?name=")
+    p = PLAYLISTS_DIR / name
+    if not p.exists():
+        return err("playlist not found", 404)
+    try:
+        lines = [ln.strip() for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
+        tracks = [ln for ln in lines if ln and not ln.startswith("#")]
+
+        prefix_candidates = [
+            "/mnt/libraries/music/",
+            "/mnt/media/wd/Musique/",
+        ]
+
+        def to_mpd_path(x: str) -> Optional[str]:
+            for pref in prefix_candidates:
+                if x.startswith(pref):
+                    return x[len(pref):]
+            if not x.startswith("/"):
+                return x
+            return None
+
+        mapped = [to_mpd_path(t) for t in tracks]
+        mapped = [m for m in mapped if m]
+        if not mapped:
+            return ok({"name": name, "tracks": []})
+
+        with _db_connect() as conn:
+            placeholders = ",".join(["?"] * len(mapped))
+            rows = conn.execute(
+                f"SELECT path, title, artist, album, duration, track_no, year FROM track WHERE path IN ({placeholders})",
+                mapped,
+            ).fetchall()
+        meta = {r["path"]: dict(r) for r in rows}
+        ordered = []
+        for path in mapped:
+            m = meta.get(path) or {"path": path}
+            if not m.get("title"):
+                m["title"] = Path(path).name
+            ordered.append(m)
+        return ok({"name": name, "tracks": ordered})
+    except Exception as e:
+        return err("playlist info failed", 500, detail=str(e))
+
+
 @app.get("/api/docs/artist/bio")
 def docs_artist_bio():
     name = (request.args.get("name") or "").strip()

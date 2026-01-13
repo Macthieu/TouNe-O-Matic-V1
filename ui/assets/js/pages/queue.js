@@ -1,4 +1,5 @@
 import { card, listRow, coverEl, button } from "../components/ui.js";
+import { AppConfig } from "../config.js";
 import { store } from "../store.js";
 import { toast } from "../utils.js";
 
@@ -21,10 +22,17 @@ export async function render(root){
 
   // build reorderable list
   for(const [i,t] of st.player.queue.entries()){
+    const cover = coverEl("sm", t.title);
+    const art = albumArtUrl(t, 120);
+    if(art){
+      cover.style.backgroundImage = `url("${art}")`;
+      cover.style.backgroundSize = "cover";
+      cover.style.backgroundPosition = "center";
+    }
     const row = listRow({
       title: t.title,
       subtitle: `${t.artist} • ${t.album}`,
-      left: coverEl("sm", t.title),
+      left: cover,
       right: button(i===st.player.index ? "En cours" : "Lire", {onClick:(ev)=>{ev.stopPropagation(); toast("Démo : jump-to via MPD plus tard.");}}),
       draggable: true,
       data: {i}
@@ -56,4 +64,13 @@ export async function render(root){
 
   c.body.append(list);
   root.append(c.root);
+}
+
+function albumArtUrl(track, size){
+  if(!track?.artist || !track?.album) return "";
+  const url = new URL(`${AppConfig.restBaseUrl}/docs/album/art`, window.location.origin);
+  url.searchParams.set("artist", track.artist);
+  url.searchParams.set("album", track.album);
+  if(size) url.searchParams.set("size", String(size));
+  return url.toString();
 }
