@@ -25,6 +25,8 @@ export async function render(root){
         cover.style.backgroundImage = `url("${url.toString()}")`;
         cover.style.backgroundSize = "cover";
         cover.style.backgroundPosition = "center";
+      } else if(f.type === "playlist" && f.playlist){
+        hydratePlaylistCover(cover, f.playlist);
       }
       const openBtn = button("Lire", {onClick:(ev)=>{
         ev.stopPropagation();
@@ -60,4 +62,22 @@ export async function render(root){
     }
     renderList();
   });
+}
+
+async function hydratePlaylistCover(coverEl, name){
+  try {
+    const url = new URL(`${AppConfig.restBaseUrl}/playlists/info`, window.location.origin);
+    url.searchParams.set("name", name);
+    const res = await fetch(url.toString());
+    const body = await res.json();
+    const first = body?.data?.tracks?.[0];
+    if(!first?.artist || !first?.album) return;
+    const art = new URL(`${AppConfig.restBaseUrl}/docs/album/art`, window.location.origin);
+    art.searchParams.set("artist", first.artist);
+    art.searchParams.set("album", first.album);
+    art.searchParams.set("size", "120");
+    coverEl.style.backgroundImage = `url("${art.toString()}")`;
+    coverEl.style.backgroundSize = "cover";
+    coverEl.style.backgroundPosition = "center";
+  } catch {}
 }

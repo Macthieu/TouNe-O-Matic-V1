@@ -103,10 +103,20 @@ async function renderPlaylistDetail(root, name){
       const actions = document.createElement("div");
       actions.className = "row__actions";
       actions.append(actionBtn("▶", "Lire", (ev)=>{ev.stopPropagation(); playPaths([t.path].filter(Boolean));}));
+      const cover = coverEl("sm", t.title || "");
+      if(t.artist && t.album){
+        const url = new URL(`${AppConfig.restBaseUrl}/docs/album/art`, window.location.origin);
+        url.searchParams.set("artist", t.artist);
+        url.searchParams.set("album", t.album);
+        url.searchParams.set("size", "120");
+        cover.style.backgroundImage = `url("${url.toString()}")`;
+        cover.style.backgroundSize = "cover";
+        cover.style.backgroundPosition = "center";
+      }
       const row = listRow({
         title: t.title || "—",
         subtitle: `${t.artist || "—"} • ${t.album || "—"}`,
-        left: coverEl("sm", t.title || ""),
+        left: cover,
         right: actions,
         draggable: true,
         data: {i: idx}

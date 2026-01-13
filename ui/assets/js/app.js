@@ -38,8 +38,8 @@ registerRoute("about",     { title: "À propos", render: About.render });
 registerRoute("search",    { title: "Recherche", render: Search.render });
 
 // Init UI
-applyTheme(store.get().ui.theme);
-store.subscribe((st)=>applyTheme(st.ui.theme));
+applyTheme(store.get().ui.theme, store.get().ui.palette);
+store.subscribe((st)=>applyTheme(st.ui.theme, st.ui.palette));
 
 // Build mock library (fallback for empty or unavailable API)
 const lib = buildMockLibrary();
@@ -142,6 +142,38 @@ searchInput?.addEventListener("keydown", (ev)=>{
     } else {
       navigate("home");
     }
+  }
+});
+
+// Keyboard shortcuts (avoid when typing)
+window.addEventListener("keydown", (ev)=>{
+  const tag = (ev.target && ev.target.tagName) ? ev.target.tagName.toLowerCase() : "";
+  const isTyping = tag === "input" || tag === "textarea" || ev.target?.isContentEditable;
+  if(isTyping) return;
+  if(ev.metaKey || ev.ctrlKey || ev.altKey) return;
+
+  if(ev.key === " "){
+    ev.preventDefault();
+    $("#btnPlayPause")?.click();
+  } else if(ev.key === "n" || ev.key === "N"){
+    $("#btnNext")?.click();
+  } else if(ev.key === "p" || ev.key === "P"){
+    $("#btnPrev")?.click();
+  } else if(ev.key === "m" || ev.key === "M" || ev.key === "s" || ev.key === "S"){
+    $("#btnShuffle")?.click();
+  } else if(ev.key === "r" || ev.key === "R"){
+    $("#btnRepeat")?.click();
+  } else if(ev.key === "/" || ev.key === "f" || ev.key === "F"){
+    ev.preventDefault();
+    searchInput?.focus();
+  } else if(ev.key === "Escape"){
+    if(searchInput?.value){
+      $("#btnSearchClear")?.click();
+    }
+  } else if(ev.key === "q" || ev.key === "Q"){
+    navigate("queue");
+  } else if(ev.key === "l" || ev.key === "L"){
+    navigate("now");
   }
 });
 
@@ -263,8 +295,9 @@ renderPlayerBar(store.get().player);
 renderQueuePane(store.get().player);
 renderHeader(store.get().player);
 
-function applyTheme(theme){
+function applyTheme(theme, palette){
   document.documentElement.dataset.theme = theme;
+  document.documentElement.dataset.palette = palette || "blue";
 }
 
 async function loadLibrary(){

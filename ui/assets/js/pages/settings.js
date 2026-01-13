@@ -2,6 +2,7 @@ import { card, listRow, coverEl, button } from "../components/ui.js";
 import { AppConfig } from "../config.js";
 import { store } from "../store.js";
 import { toast } from "../utils.js";
+import { renderRoute } from "../router.js";
 
 export async function render(root){
   const st = store.get();
@@ -19,16 +20,29 @@ export async function render(root){
 
   list.append(listRow({
     title:"Mode liste/grille",
-    subtitle:"Démo : listes seulement",
+    subtitle: st.ui.layout === "grid" ? "Grille" : "Liste",
     left: coverEl("sm","layout"),
-    right: button("Configurer", {onClick:(ev)=>{ev.stopPropagation(); toast("Démo : plus tard.");}})
+    right: button("Basculer", {onClick:(ev)=>{
+      ev.stopPropagation();
+      const next = st.ui.layout === "grid" ? "list" : "grid";
+      store.setLayout(next);
+      toast(next === "grid" ? "Vue grille" : "Vue liste");
+      renderRoute();
+    }})
   }));
 
+  const paletteLabel = paletteName(st.ui.palette);
   list.append(listRow({
     title:"Couleurs",
-    subtitle:"Palette (démo)",
+    subtitle:`Palette: ${paletteLabel}`,
     left: coverEl("sm","colors"),
-    right: button("Changer", {onClick:(ev)=>{ev.stopPropagation(); toast("Démo : plus tard.");}})
+    right: button("Changer", {onClick:(ev)=>{
+      ev.stopPropagation();
+      const next = nextPalette(st.ui.palette);
+      store.setPalette(next);
+      toast(`Palette: ${paletteName(next)}`);
+      renderRoute();
+    }})
   }));
 
   ui.body.append(list);
@@ -301,10 +315,8 @@ export async function render(root){
     try {
       await fetch(`${AppConfig.restBaseUrl}/library/scan`, {method: "POST"});
     } catch {}
-  await refreshStatus();
-  await refreshLatency();
-  await refreshSnapcastStatus();
-}
+    await refreshStatus();
+  }
 
   async function fetchStatus(){
     if(AppConfig.transport !== "rest") return null;
@@ -423,4 +435,22 @@ export async function render(root){
 
   await refreshStatus();
   await refreshDocsStatus();
+  await refreshLatency();
+  await refreshSnapcastStatus();
+}
+
+function paletteName(key){
+  return {
+    blue: "Bleu",
+    amber: "Ambre",
+    emerald: "Émeraude",
+    rose: "Rose",
+    slate: "Ardoise"
+  }[key] || key;
+}
+
+function nextPalette(current){
+  const list = ["blue", "amber", "emerald", "rose", "slate"];
+  const idx = list.indexOf(current);
+  return list[(idx + 1) % list.length];
 }

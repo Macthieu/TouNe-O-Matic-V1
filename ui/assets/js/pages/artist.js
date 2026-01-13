@@ -70,43 +70,45 @@ export async function render(root, params){
   // Albums
   body.appendChild(el("div", { className: "card" }, [
     el("div", { className: "card__title" }, ["Albums"]),
-    el("div", { className: "list" }, (artist.albums || []).map((al)=>{
-      const row = el("div", { className: "media-row", role: "button", tabindex: "0" });
-      row.addEventListener("click", ()=>navigate("album", new URLSearchParams({id: al.id})));
-      row.addEventListener("keydown", (ev)=>{
-        if(ev.key === "Enter") navigate("album", new URLSearchParams({id: al.id}));
-      });
-      const artUrl = getAlbumArtUrl(al.artist, al.title, 220);
-      const review = albumReviews.get(al.title) || "";
-      row.append(
-        el("div", { className: "media-row__art" }, [
-          el("img", {
-            className: "media-row__img",
-            src: artUrl,
-            alt: "",
-            loading: "lazy",
-            decoding: "async",
-            onerror: (ev)=>{ ev.currentTarget.classList.add("is-missing"); }
-          })
-        ]),
-        el("div", { className: "media-row__body" }, [
-          el("div", { className: "media-row__title ellipsis" }, [al.title]),
-          el("div", { className: "muted small" }, [`${al.year} • ${al.tracks.length} titres`]),
-          el("div", { className: "media-row__text muted small" }, [review || "Aucune critique disponible."])
-        ]),
-        el("div", { className: "media-row__actions" }, [
-          actionBtn("▶", "Lire l’album", async (ev)=>{
-            ev.stopPropagation();
-            await playPaths((al.tracks || []).map(t=>t.path).filter(Boolean));
-          }),
-          actionBtn("+", "Ajouter l’album", (ev)=>{
-            ev.stopPropagation();
-            showAddMenu(ev.currentTarget, {title: al.title, paths: (al.tracks || []).map(t=>t.path).filter(Boolean)});
-          }),
-        ])
-      );
-      return row;
-    }))
+    st.ui.layout === "grid"
+      ? renderAlbumGrid(artist.albums || [])
+      : el("div", { className: "list" }, (artist.albums || []).map((al)=>{
+          const row = el("div", { className: "media-row", role: "button", tabindex: "0" });
+          row.addEventListener("click", ()=>navigate("album", new URLSearchParams({id: al.id})));
+          row.addEventListener("keydown", (ev)=>{
+            if(ev.key === "Enter") navigate("album", new URLSearchParams({id: al.id}));
+          });
+          const artUrl = getAlbumArtUrl(al.artist, al.title, 220);
+          const review = albumReviews.get(al.title) || "";
+          row.append(
+            el("div", { className: "media-row__art" }, [
+              el("img", {
+                className: "media-row__img",
+                src: artUrl,
+                alt: "",
+                loading: "lazy",
+                decoding: "async",
+                onerror: (ev)=>{ ev.currentTarget.classList.add("is-missing"); }
+              })
+            ]),
+            el("div", { className: "media-row__body" }, [
+              el("div", { className: "media-row__title ellipsis" }, [al.title]),
+              el("div", { className: "muted small" }, [`${al.year} • ${al.tracks.length} titres`]),
+              el("div", { className: "media-row__text muted small" }, [review || "Aucune critique disponible."])
+            ]),
+            el("div", { className: "media-row__actions" }, [
+              actionBtn("▶", "Lire l’album", async (ev)=>{
+                ev.stopPropagation();
+                await playPaths((al.tracks || []).map(t=>t.path).filter(Boolean));
+              }),
+              actionBtn("+", "Ajouter l’album", (ev)=>{
+                ev.stopPropagation();
+                showAddMenu(ev.currentTarget, {title: al.title, paths: (al.tracks || []).map(t=>t.path).filter(Boolean)});
+              }),
+            ])
+          );
+          return row;
+        }))
   ]));
 
   root.appendChild(page);
@@ -173,4 +175,34 @@ function actionBtn(label, title, onClick){
   btn.textContent = label;
   btn.addEventListener("click", onClick);
   return btn;
+}
+
+function renderAlbumGrid(albums){
+  return el("div", { className: "gridlist" }, albums.map((al)=>{
+    const paths = (al.tracks || []).map(t=>t.path).filter(Boolean);
+    const tile = el("button", { className: "albumtile", type: "button" });
+    tile.addEventListener("click", ()=>navigate("album", new URLSearchParams({id: al.id})));
+    const cover = el("div", { className: "albumtile__cover" });
+    const artUrl = getAlbumArtUrl(al.artist, al.title, 220);
+    cover.style.backgroundImage = `url("${artUrl}")`;
+    cover.style.backgroundSize = "cover";
+    cover.style.backgroundPosition = "center";
+    const actions = el("div", { className: "albumtile__actions" }, [
+      actionBtn("▶", "Lire l’album", async (ev)=>{
+        ev.stopPropagation();
+        await playPaths(paths);
+      }),
+      actionBtn("+", "Ajouter l’album", (ev)=>{
+        ev.stopPropagation();
+        showAddMenu(ev.currentTarget, {title: al.title, paths});
+      }),
+    ]);
+    tile.append(
+      cover,
+      actions,
+      el("div", { className: "albumtile__title ellipsis" }, [al.title]),
+      el("div", { className: "albumtile__sub ellipsis muted" }, [`${al.year} • ${al.tracks.length} titres`])
+    );
+    return tile;
+  }));
 }

@@ -1,7 +1,9 @@
 import { store } from "../store.js";
 import { el } from "../utils.js";
+import { listRow, coverEl } from "../components/ui.js";
 import { navigate } from "../router.js";
 import { playPaths, showAddMenu } from "../services/library.js";
+import { AppConfig } from "../config.js";
 
 function row(icon, title, subtitle, onClick, trailing = "⋮"){
   const a = document.createElement("button");
@@ -92,46 +94,66 @@ export async function render(root, params){
   // category views
   if(cat === "artists" || cat === "albumartists"){
     const items = (cat === "albumartists" ? (st.library.albumartists || []) : (st.library.artists || [])).slice().sort((a,b)=>a.name.localeCompare(b.name));
+    const useGrid = st.ui.layout === "grid";
     body.appendChild(el("div", { className: "card" }, [
       el("div", { className: "card__title" }, [cat === "artists" ? "Artistes" : "Artistes d’album"]),
-      el("div", { className: "list" }, items.map(a =>{
-        const paths = flattenArtistPaths(a);
-        const actions = el("div", { className: "row__actions" }, [
-          actionBtn("▶", "Lire l’artiste", async (ev)=>{
-            ev.stopPropagation();
-            await playPaths(paths);
-          }),
-          actionBtn("+", "Ajouter l’artiste", (ev)=>{
-            ev.stopPropagation();
-            showAddMenu(ev.currentTarget, {title: a.name, paths});
-          }),
-        ]);
-        const r = rowWithActions("👤", a.name, `${a.albums.length} albums`, ()=>navigate("artist", new URLSearchParams({id: a.id})), actions);
-        return r;
-      }))
+      useGrid
+        ? renderArtistGrid(items)
+        : el("div", { className: "list" }, items.map(a =>{
+            const paths = flattenArtistPaths(a);
+            const cover = coverEl("sm", a.name);
+            hydrateArtistCover(cover, a.name);
+            const actions = el("div", { className: "row__actions" }, [
+              actionBtn("▶", "Lire l’artiste", async (ev)=>{
+                ev.stopPropagation();
+                await playPaths(paths);
+              }),
+              actionBtn("+", "Ajouter l’artiste", (ev)=>{
+                ev.stopPropagation();
+                showAddMenu(ev.currentTarget, {title: a.name, paths});
+              }),
+            ]);
+            return listRow({
+              title: a.name,
+              subtitle: `${a.albums.length} albums`,
+              left: cover,
+              right: actions,
+              onClick: ()=>navigate("artist", new URLSearchParams({id: a.id}))
+            });
+          }))
     ]));
     return;
   }
 
   if(cat === "albums"){
     const albums = (st.library.albums || []).slice().sort((a,b)=>a.title.localeCompare(b.title));
+    const useGrid = st.ui.layout === "grid";
     body.appendChild(el("div", { className: "card" }, [
       el("div", { className: "card__title" }, ["Albums"]),
-      el("div", { className: "list" }, albums.map(al =>{
-        const paths = (al.tracks || []).map(t=>t.path).filter(Boolean);
-        const actions = el("div", { className: "row__actions" }, [
-          actionBtn("▶", "Lire l’album", async (ev)=>{
-            ev.stopPropagation();
-            await playPaths(paths);
-          }),
-          actionBtn("+", "Ajouter l’album", (ev)=>{
-            ev.stopPropagation();
-            showAddMenu(ev.currentTarget, {title: al.title, paths});
-          }),
-        ]);
-        const r = rowWithActions("💿", al.title, `${al.artist} • ${al.year}`, ()=>navigate("album", new URLSearchParams({id: al.id})), actions);
-        return r;
-      }))
+      useGrid
+        ? renderAlbumGrid(albums)
+        : el("div", { className: "list" }, albums.map(al =>{
+            const paths = (al.tracks || []).map(t=>t.path).filter(Boolean);
+            const cover = coverEl("sm", al.title);
+            hydrateAlbumCover(cover, al.artist, al.title);
+            const actions = el("div", { className: "row__actions" }, [
+              actionBtn("▶", "Lire l’album", async (ev)=>{
+                ev.stopPropagation();
+                await playPaths(paths);
+              }),
+              actionBtn("+", "Ajouter l’album", (ev)=>{
+                ev.stopPropagation();
+                showAddMenu(ev.currentTarget, {title: al.title, paths});
+              }),
+            ]);
+            return listRow({
+              title: al.title,
+              subtitle: `${al.artist} • ${al.year}`,
+              left: cover,
+              right: actions,
+              onClick: ()=>navigate("album", new URLSearchParams({id: al.id}))
+            });
+          }))
     ]));
     return;
   }
@@ -182,22 +204,33 @@ export async function render(root, params){
 
   if(cat === "newmusic"){
     const items = (st.library.newmusic || []).slice();
+    const useGrid = st.ui.layout === "grid";
     body.appendChild(el("div", { className: "card" }, [
       el("div", { className: "card__title" }, ["Nouveautés"]),
-      el("div", { className: "list" }, items.map(al =>{
-        const paths = (al.tracks || []).map(t=>t.path).filter(Boolean);
-        const actions = el("div", { className: "row__actions" }, [
-          actionBtn("▶", "Lire l’album", async (ev)=>{
-            ev.stopPropagation();
-            await playPaths(paths);
-          }),
-          actionBtn("+", "Ajouter l’album", (ev)=>{
-            ev.stopPropagation();
-            showAddMenu(ev.currentTarget, {title: al.title, paths});
-          }),
-        ]);
-        return rowWithActions("🆕", al.title, `${al.artist} • ${al.year}`, ()=>navigate("album", new URLSearchParams({id: al.id})), actions);
-      }))
+      useGrid
+        ? renderAlbumGrid(items)
+        : el("div", { className: "list" }, items.map(al =>{
+            const paths = (al.tracks || []).map(t=>t.path).filter(Boolean);
+            const cover = coverEl("sm", al.title);
+            hydrateAlbumCover(cover, al.artist, al.title);
+            const actions = el("div", { className: "row__actions" }, [
+              actionBtn("▶", "Lire l’album", async (ev)=>{
+                ev.stopPropagation();
+                await playPaths(paths);
+              }),
+              actionBtn("+", "Ajouter l’album", (ev)=>{
+                ev.stopPropagation();
+                showAddMenu(ev.currentTarget, {title: al.title, paths});
+              }),
+            ]);
+            return listRow({
+              title: al.title,
+              subtitle: `${al.artist} • ${al.year}`,
+              left: cover,
+              right: actions,
+              onClick: ()=>navigate("album", new URLSearchParams({id: al.id}))
+            });
+          }))
     ]));
     return;
   }
@@ -207,6 +240,8 @@ export async function render(root, params){
     body.appendChild(el("div", { className: "card" }, [
       el("div", { className: "card__title" }, ["Mix aléatoire"]),
       el("div", { className: "list" }, items.map((t, idx)=>{
+        const cover = coverEl("sm", t.title || "");
+        hydrateAlbumCover(cover, t.artist, t.album);
         const actions = el("div", { className: "row__actions" }, [
           actionBtn("▶", "Lire la piste", async (ev)=>{
             ev.stopPropagation();
@@ -217,7 +252,12 @@ export async function render(root, params){
             showAddMenu(ev.currentTarget, {title: t.title, paths: [t.path].filter(Boolean)});
           }),
         ]);
-        return rowWithActions("🔀", t.title || "—", `${t.artist || "—"} • ${t.album || "—"}`, ()=>{}, actions);
+        return listRow({
+          title: t.title || "—",
+          subtitle: `${t.artist || "—"} • ${t.album || "—"}`,
+          left: cover,
+          right: actions
+        });
       }))
     ]));
     return;
@@ -272,4 +312,79 @@ function actionBtn(label, title, onClick){
   btn.textContent = label;
   btn.addEventListener("click", onClick);
   return btn;
+}
+
+function hydrateArtistCover(el, name){
+  if(AppConfig.transport !== "rest" || !name) return;
+  const url = new URL(`${AppConfig.restBaseUrl}/docs/artist/photo`, window.location.origin);
+  url.searchParams.set("name", name);
+  url.searchParams.set("size", "120");
+  el.style.backgroundImage = `url("${url.toString()}")`;
+  el.style.backgroundSize = "cover";
+  el.style.backgroundPosition = "center";
+}
+
+function renderAlbumGrid(albums){
+  return el("div", { className: "gridlist" }, albums.map(al=>{
+    const paths = (al.tracks || []).map(t=>t.path).filter(Boolean);
+    const tile = el("button", { className: "albumtile", type: "button" });
+    tile.addEventListener("click", ()=>navigate("album", new URLSearchParams({id: al.id})));
+    const cover = el("div", { className: "albumtile__cover" });
+    hydrateAlbumCover(cover, al.artist, al.title);
+    const actions = el("div", { className: "albumtile__actions" }, [
+      actionBtn("▶", "Lire l’album", async (ev)=>{
+        ev.stopPropagation();
+        await playPaths(paths);
+      }),
+      actionBtn("+", "Ajouter l’album", (ev)=>{
+        ev.stopPropagation();
+        showAddMenu(ev.currentTarget, {title: al.title, paths});
+      }),
+    ]);
+    tile.append(
+      cover,
+      actions,
+      el("div", { className: "albumtile__title ellipsis" }, [al.title]),
+      el("div", { className: "albumtile__sub ellipsis muted" }, [`${al.artist} • ${al.year}`])
+    );
+    return tile;
+  }));
+}
+
+function renderArtistGrid(artists){
+  return el("div", { className: "gridlist" }, artists.map(a=>{
+    const paths = flattenArtistPaths(a);
+    const tile = el("button", { className: "artisttile", type: "button" });
+    tile.addEventListener("click", ()=>navigate("artist", new URLSearchParams({id: a.id})));
+    const cover = el("div", { className: "artisttile__cover" });
+    hydrateArtistCover(cover, a.name);
+    const actions = el("div", { className: "artisttile__actions" }, [
+      actionBtn("▶", "Lire l’artiste", async (ev)=>{
+        ev.stopPropagation();
+        await playPaths(paths);
+      }),
+      actionBtn("+", "Ajouter l’artiste", (ev)=>{
+        ev.stopPropagation();
+        showAddMenu(ev.currentTarget, {title: a.name, paths});
+      }),
+    ]);
+    tile.append(
+      cover,
+      actions,
+      el("div", { className: "artisttile__title ellipsis" }, [a.name]),
+      el("div", { className: "artisttile__sub ellipsis muted" }, [`${a.albums.length} albums`])
+    );
+    return tile;
+  }));
+}
+
+function hydrateAlbumCover(el, artist, album){
+  if(AppConfig.transport !== "rest" || !artist || !album) return;
+  const url = new URL(`${AppConfig.restBaseUrl}/docs/album/art`, window.location.origin);
+  url.searchParams.set("artist", artist);
+  url.searchParams.set("album", album);
+  url.searchParams.set("size", "120");
+  el.style.backgroundImage = `url("${url.toString()}")`;
+  el.style.backgroundSize = "cover";
+  el.style.backgroundPosition = "center";
 }

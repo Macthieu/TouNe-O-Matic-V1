@@ -66,31 +66,35 @@ export async function render(root, params){
 
   // Track list
   const total = (album.tracks || []).reduce((acc,t)=>acc + (t.duration||0), 0);
+  const useGrid = st.ui.layout === "grid";
+  const gridArtUrl = getAlbumArtUrl(album.artist, album.title, 220);
   body.appendChild(el("div", { className: "card" }, [
     el("div", { className: "card__title" }, ["Pistes"]),
     el("div", { className: "muted small", style: "margin:-4px 0 10px" }, [`${album.tracks.length} pistes • ${formatTime(total)}`]),
-    el("div", { className: "list" }, (album.tracks || []).map((t, idx)=>{
-      const row = el("div", { className: "track-row" });
-      row.append(
-        el("div", { className: "track-row__num", "aria-hidden": "true" }, [String(idx+1)]),
-        el("div", { className: "track-row__main" }, [
-          el("div", { className: "ellipsis strong" }, [t.title]),
-          el("div", { className: "ellipsis muted small" }, [t.artist || album.artist]),
-        ]),
-        el("div", { className: "track-row__meta muted" }, [formatTime(t.duration || 0)]),
-        el("div", { className: "track-row__actions" }, [
-          actionBtn("▶", "Lire la piste", async (ev)=>{
-            ev.stopPropagation();
-            await playPaths([t.path].filter(Boolean));
-          }),
-          actionBtn("+", "Ajouter la piste", (ev)=>{
-            ev.stopPropagation();
-            showAddMenu(ev.currentTarget, {title: t.title, paths: [t.path].filter(Boolean)});
-          }),
-        ])
-      );
-      return row;
-    }))
+    useGrid
+      ? renderTrackGrid(album, gridArtUrl)
+      : el("div", { className: "list" }, (album.tracks || []).map((t, idx)=>{
+          const row = el("div", { className: "track-row" });
+          row.append(
+            el("div", { className: "track-row__num", "aria-hidden": "true" }, [String(idx+1)]),
+            el("div", { className: "track-row__main" }, [
+              el("div", { className: "ellipsis strong" }, [t.title]),
+              el("div", { className: "ellipsis muted small" }, [t.artist || album.artist]),
+            ]),
+            el("div", { className: "track-row__meta muted" }, [formatTime(t.duration || 0)]),
+            el("div", { className: "track-row__actions" }, [
+              actionBtn("▶", "Lire la piste", async (ev)=>{
+                ev.stopPropagation();
+                await playPaths([t.path].filter(Boolean));
+              }),
+              actionBtn("+", "Ajouter la piste", (ev)=>{
+                ev.stopPropagation();
+                showAddMenu(ev.currentTarget, {title: t.title, paths: [t.path].filter(Boolean)});
+              }),
+            ])
+          );
+          return row;
+        }))
   ]));
 
   root.appendChild(page);
@@ -122,4 +126,36 @@ function actionBtn(label, title, onClick){
   btn.textContent = label;
   btn.addEventListener("click", onClick);
   return btn;
+}
+
+function renderTrackGrid(album, artUrl){
+  return el("div", { className: "gridlist" }, (album.tracks || []).map((t, idx)=>{
+    const tile = el("button", { className: "tracktile", type: "button" });
+    tile.addEventListener("click", async ()=>{
+      await playPaths([t.path].filter(Boolean));
+    });
+    const cover = el("div", { className: "tracktile__cover" });
+    cover.style.backgroundImage = `url("${artUrl}")`;
+    cover.style.backgroundSize = "cover";
+    cover.style.backgroundPosition = "center";
+    const actions = el("div", { className: "tracktile__actions" }, [
+      actionBtn("▶", "Lire la piste", async (ev)=>{
+        ev.stopPropagation();
+        await playPaths([t.path].filter(Boolean));
+      }),
+      actionBtn("+", "Ajouter la piste", (ev)=>{
+        ev.stopPropagation();
+        showAddMenu(ev.currentTarget, {title: t.title, paths: [t.path].filter(Boolean)});
+      }),
+    ]);
+    const title = t.title ? `${idx + 1}. ${t.title}` : `Piste ${idx + 1}`;
+    const meta = `${t.artist || album.artist} • ${formatTime(t.duration || 0)}`;
+    tile.append(
+      cover,
+      actions,
+      el("div", { className: "tracktile__title ellipsis" }, [title]),
+      el("div", { className: "tracktile__sub ellipsis muted" }, [meta])
+    );
+    return tile;
+  }));
 }

@@ -11,6 +11,8 @@ export const store = (() => {
     },
     ui: {
       theme: localStorage.getItem("toune.theme") || "dark", // "dark" | "light"
+      layout: localStorage.getItem("toune.layout") || "list", // "list" | "grid"
+      palette: localStorage.getItem("toune.palette") || "blue",
       drawerOpen: false,
       queueOpen: false,
     },
@@ -64,10 +66,22 @@ export const store = (() => {
     set({ui:{theme}});
   }
 
+  function setLayout(layout){
+    layout = (layout === "grid") ? "grid" : "list";
+    localStorage.setItem("toune.layout", layout);
+    set({ui:{layout}});
+  }
+
+  function setPalette(palette){
+    palette = (palette || "blue").toString();
+    localStorage.setItem("toune.palette", palette);
+    set({ui:{palette}});
+  }
+
   function setVolume(vol){
     vol = clamp(vol, 0, 100);
     set({player:{volume: vol}});
   }
 
-  return { set, get, subscribe, setTheme, setVolume };
+  return { set, get, subscribe, setTheme, setLayout, setPalette, setVolume };
 })();

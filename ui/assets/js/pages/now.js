@@ -63,10 +63,17 @@ export async function render(root){
   list.className = "list";
   list.style.marginTop = "10px";
   for(const n of next){
+    const cover = coverEl("sm", n.title);
+    const artNext = albumArtUrl(n, 120);
+    if(artNext){
+      cover.style.backgroundImage = `url("${artNext}")`;
+      cover.style.backgroundSize = "cover";
+      cover.style.backgroundPosition = "center";
+    }
     list.append(listRow({
       title: n.title,
       subtitle: `${n.artist} • ${n.album}`,
-      left: coverEl("sm", n.title),
+      left: cover,
     }));
   }
   if(!next.length){
