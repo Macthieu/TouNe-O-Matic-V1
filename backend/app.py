@@ -1251,6 +1251,9 @@ def _get_artist_photo(name: str) -> Tuple[Optional[str], str]:
     url = _wikipedia_image(name, "fr") or _wikipedia_image(name, "en")
     if url:
         return url, "wikipedia"
+    url = _wikidata_artist_image(name)
+    if url:
+        return url, "wikidata"
     url = _lastfm_artist_image(name)
     if url:
         return url, "lastfm"
@@ -1409,6 +1412,61 @@ def _wikipedia_search_title(query: str, lang: str) -> Optional[str]:
     data = res.json()
     titles = data[1] if isinstance(data, list) and len(data) > 1 else []
     return titles[0] if titles else None
+
+
+def _wikidata_artist_image(name: str) -> Optional[str]:
+    try:
+        for lang in ("fr", "en"):
+            entity = _wikidata_search_entity(name, lang)
+            if not entity:
+                continue
+            img = _wikidata_entity_image(entity)
+            if img:
+                return img
+    except Exception:
+        return None
+    return None
+
+
+def _wikidata_search_entity(query: str, lang: str) -> Optional[str]:
+    url = "https://www.wikidata.org/w/api.php"
+    params = {
+        "action": "wbsearchentities",
+        "search": query,
+        "language": lang,
+        "format": "json",
+        "limit": 1,
+    }
+    res = requests.get(url, params=params, timeout=10)
+    if res.status_code != 200:
+        return None
+    results = res.json().get("search", [])
+    if not results:
+        return None
+    return results[0].get("id")
+
+
+def _wikidata_entity_image(entity_id: str) -> Optional[str]:
+    url = "https://www.wikidata.org/w/api.php"
+    params = {
+        "action": "wbgetentities",
+        "ids": entity_id,
+        "props": "claims",
+        "format": "json",
+    }
+    res = requests.get(url, params=params, timeout=10)
+    if res.status_code != 200:
+        return None
+    entity = res.json().get("entities", {}).get(entity_id, {})
+    claims = entity.get("claims", {})
+    images = claims.get("P18", [])
+    if not images:
+        return None
+    filename = images[0].get("mainsnak", {}).get("datavalue", {}).get("value")
+    if not filename:
+        return None
+    safe = filename.replace(" ", "_")
+    return f"https://commons.wikimedia.org/wiki/Special:FilePath/{requests.utils.quote(safe)}?width=800"
 
 
 def _lastfm_artist_bio(name: str, lang: str = "fr") -> Optional[str]:
