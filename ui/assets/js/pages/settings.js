@@ -143,8 +143,11 @@ export async function render(root){
   const latencyNote = document.createElement("div");
   latencyNote.className = "muted small";
   latencyNote.textContent = "Appliqué aux clients Snapcast connectés.";
+  const latencyList = document.createElement("div");
+  latencyList.className = "list";
+  latencyList.style.marginTop = "8px";
   multiRow.append(latencyRange, latencyApply);
-  multiWrap.append(latencyLabel, multiRow, latencyNote);
+  multiWrap.append(latencyLabel, multiRow, latencyNote, latencyList);
   multi.body.append(multiWrap);
   root.append(multi.root);
 
@@ -239,6 +242,39 @@ export async function render(root){
     } catch {}
   }
 
+  async function refreshSnapcastStatus(){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/snapcast/status`);
+      const body = await res.json();
+      if(!body?.ok) return;
+      const groups = body.data?.groups || [];
+      const clients = [];
+      groups.forEach((g)=>{
+        (g.clients || []).forEach((c)=>{
+          clients.push({group: g.name, ...c});
+        });
+      });
+      if(!clients.length){
+        latencyList.innerHTML = '<div class="muted">Aucun client Snapcast connecté.</div>';
+        return;
+      }
+      latencyList.innerHTML = "";
+      clients.forEach((c)=>{
+        const row = document.createElement("div");
+        row.className = "row";
+        row.innerHTML = `
+          <div class="row__main">
+            <div class="row__title ellipsis">${c.name || c.host?.name || c.id || "Client"}</div>
+            <div class="row__sub ellipsis muted small">Snapcast • ${c.connected ? "en ligne" : "hors ligne"} • ${c.group || "Groupe"}</div>
+          </div>
+          <div class="row__trail muted small">${c.latency ?? "—"} ms</div>
+        `;
+        latencyList.append(row);
+      });
+    } catch {}
+  }
+
   async function applyLatency(ms){
     if(AppConfig.transport !== "rest") return;
     try {
@@ -251,6 +287,7 @@ export async function render(root){
       if(body?.ok){
         latencyLabel.textContent = `Latence: ${body.data.latency_ms} ms`;
         toast("Latence Snapcast appliquée");
+        await refreshSnapcastStatus();
       } else {
         toast(body?.error || "Erreur Snapcast");
       }
@@ -266,6 +303,7 @@ export async function render(root){
     } catch {}
   await refreshStatus();
   await refreshLatency();
+  await refreshSnapcastStatus();
 }
 
   async function fetchStatus(){

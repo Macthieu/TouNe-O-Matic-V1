@@ -261,15 +261,59 @@ def _snapcast_rpc(method: str, params: Optional[Dict[str, Any]] = None) -> Dict[
 def _snapcast_clients() -> Tuple[List[str], Dict[str, Any]]:
     result = _snapcast_rpc("Server.GetStatus")
     server = result.get("server", {})
-    clients = server.get("clients", {}) or {}
     ids: List[str] = []
+    clients: Dict[str, Any] = {}
     for group in server.get("groups", []) or []:
-        for cid in group.get("clients", []) or []:
+        for c in group.get("clients", []) or []:
+            cid = c.get("id")
+            if not cid:
+                continue
             if cid not in ids:
                 ids.append(cid)
+            clients[cid] = c
     if not ids:
         ids = list(clients.keys())
     return ids, clients
+
+
+def _snapcast_status() -> Dict[str, Any]:
+    result = _snapcast_rpc("Server.GetStatus")
+    server = result.get("server", {})
+    groups = []
+    all_clients: Dict[str, Any] = {}
+    for group in server.get("groups", []) or []:
+        clients = []
+        for c in group.get("clients", []) or []:
+            cfg = c.get("config") or {}
+            host = c.get("host") or {}
+            name = (cfg.get("name") or host.get("name") or c.get("id") or "").strip()
+            client = {
+                "id": c.get("id"),
+                "name": name,
+                "connected": bool(c.get("connected")),
+                "latency": cfg.get("latency"),
+                "volume": (cfg.get("volume") or {}).get("percent"),
+                "muted": (cfg.get("volume") or {}).get("muted"),
+                "host": {
+                    "name": host.get("name"),
+                    "ip": host.get("ip"),
+                    "os": host.get("os"),
+                    "arch": host.get("arch"),
+                    "mac": host.get("mac"),
+                },
+                "last_seen": c.get("lastSeen"),
+            }
+            clients.append(client)
+            if client.get("id"):
+                all_clients[client["id"]] = client
+        groups.append({
+            "id": group.get("id"),
+            "name": group.get("name") or "Groupe",
+            "stream_id": group.get("stream_id"),
+            "clients": clients,
+        })
+    streams = result.get("server", {}).get("streams", []) or []
+    return {"groups": groups, "clients": list(all_clients.values()), "streams": streams}
 
 
 def _snapcast_load_state() -> Dict[str, Any]:
@@ -736,6 +780,15 @@ def snapcast_latency_set():
         return ok({"latency_ms": latency, "clients": len(ids)})
     except Exception as e:
         return err("snapcast update failed", 500, detail=str(e))
+
+
+@app.get("/api/snapcast/status")
+def snapcast_status():
+    try:
+        data = _snapcast_status()
+        return ok(data)
+    except Exception as e:
+        return err("snapcast status failed", 500, detail=str(e))
 
 
 @app.post("/api/library/queue/random-next")
