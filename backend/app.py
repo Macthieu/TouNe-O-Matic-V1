@@ -4,6 +4,8 @@ import os
 from contextlib import contextmanager
 import hashlib
 import shutil
+import io
+import json
 import random
 import sqlite3
 import threading
@@ -31,6 +33,7 @@ LASTFM_API_KEY = os.environ.get("LASTFM_API_KEY", "")
 DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN", "")
 GOOGLE_CSE_API_KEY = os.environ.get("GOOGLE_CSE_API_KEY", "")
 GOOGLE_CSE_CX = os.environ.get("GOOGLE_CSE_CX", "")
+PHOTO_SOURCES_FILE = DOCS_ROOT / "Photos d'artiste" / "_sources.json"
 
 SCAN_STATE = {
     "running": False,
@@ -1259,35 +1262,16 @@ def _get_artist_bio(name: str) -> Tuple[Optional[str], str, str]:
 
 
 def _get_artist_photo(name: str) -> Tuple[Optional[str], str]:
-    url = _wikipedia_image(name, "fr") or _wikipedia_image(name, "en")
-    if url:
-        return url, "wikipedia"
-    url = _wikidata_artist_image(name)
-    if url:
-        return url, "wikidata"
-    url = _lastfm_artist_image(name)
-    if url:
-        return url, "lastfm"
-    url = _lastfm_artist_image(name, autocorrect=True)
-    if url:
-        return url, "lastfm"
-    url = _discogs_artist_image(name)
-    if url:
-        return url, "discogs"
+    order = _photo_source_order(name)
     simple = _simplify_artist_name(name)
-    if simple != name:
-        url = _wikipedia_image(simple, "fr") or _wikipedia_image(simple, "en")
-        if url:
-            return url, "wikipedia"
-        url = _wikidata_artist_image(simple)
-        if url:
-            return url, "wikidata"
-        url = _lastfm_artist_image(simple, autocorrect=True)
-        if url:
-            return url, "lastfm"
-    url = _google_artist_image(name)
+
+    url, source = _get_artist_photo_from_sources(name, order)
     if url:
-        return url, "google"
+        return url, source
+    if simple != name:
+        url, source = _get_artist_photo_from_sources(simple, order)
+        if url:
+            return url, source
     return None, ""
 
 
@@ -1483,11 +1467,60 @@ def _wikidata_entity_image(entity_id: str) -> Optional[str]:
     if not filename:
         return None
     safe = filename.replace(" ", "_")
-    return f"https://commons.wikimedia.org/wiki/Special:FilePath/{requests.utils.quote(safe)}?width=800"
+    return f"https://commons.wikimedia.org/w/thumb.php?f={requests.utils.quote(safe)}&w=800"
+
+
+def _photo_source_order(name: str) -> List[str]:
+    default = ["wikipedia", "wikidata", "lastfm", "discogs", "google"]
+    overrides = _load_photo_overrides()
+    if overrides:
+        artists = overrides.get("artists", {}) if isinstance(overrides, dict) else {}
+        if isinstance(artists, dict):
+            custom = artists.get(name) or artists.get(_simplify_artist_name(name))
+            if isinstance(custom, list) and custom:
+                default = [s for s in custom if isinstance(s, str)]
+        if isinstance(overrides, dict):
+            base = overrides.get("default")
+            if isinstance(base, list) and base:
+                default = [s for s in base if isinstance(s, str)]
+    # ensure google is last resort unless explicitly overridden
+    if "google" in default:
+        default = [s for s in default if s != "google"] + ["google"]
+    return default
+
+
+def _load_photo_overrides() -> Optional[Dict[str, Any]]:
+    try:
+        if PHOTO_SOURCES_FILE.exists():
+            return json.loads(PHOTO_SOURCES_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return None
+
+
+def _get_artist_photo_from_sources(name: str, order: List[str]) -> Tuple[Optional[str], str]:
+    for source in order:
+        if source == "wikipedia":
+            url = _wikipedia_image(name, "fr") or _wikipedia_image(name, "en")
+        elif source == "wikidata":
+            url = _wikidata_artist_image(name)
+        elif source == "lastfm":
+            url = _lastfm_artist_image(name) or _lastfm_artist_image(name, autocorrect=True)
+        elif source == "discogs":
+            url = _discogs_artist_image(name)
+        elif source == "google":
+            url = _google_artist_image(name)
+        else:
+            url = None
+        if url:
+            return url, source
+    return None, ""
 
 
 def _fallback_artist_photo_from_albums(artist: str, dest_path: Path) -> bool:
     try:
+        if dest_path.exists() and not _is_album_cover_copy(artist, dest_path):
+            return False
         with _db_connect() as conn:
             rows = conn.execute(
                 "SELECT DISTINCT album FROM track WHERE artist = ? AND album IS NOT NULL",
@@ -1795,11 +1828,14 @@ def _translate_to_fr(text: str, source_lang: str, source: str) -> str:
 
 def _download_image(url: str, dest: Path) -> bool:
     try:
-        res = requests.get(url, stream=True, timeout=15)
+        res = _http_get(url, stream=True, timeout=15)
         if res.status_code != 200:
             return False
-        res.raw.decode_content = True
-        img = Image.open(res.raw).convert("RGB")
+        content_type = (res.headers.get("Content-Type") or "").lower()
+        if "image/svg" in content_type:
+            return False
+        data = res.content
+        img = Image.open(io.BytesIO(data)).convert("RGB")
         tmp = dest.with_suffix(".tmp.jpg")
         img.save(tmp, "JPEG", quality=90, optimize=True)
         if tmp.stat().st_size < 1024:
