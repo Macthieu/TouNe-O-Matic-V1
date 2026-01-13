@@ -31,20 +31,6 @@ export async function render(root){
     }})
   }));
 
-  const paletteLabel = paletteName(st.ui.palette);
-  list.append(listRow({
-    title:"Couleurs",
-    subtitle:`Palette: ${paletteLabel}`,
-    left: coverEl("sm","colors"),
-    right: button("Changer", {onClick:(ev)=>{
-      ev.stopPropagation();
-      const next = nextPalette(st.ui.palette);
-      store.setPalette(next);
-      toast(`Palette: ${paletteName(next)}`);
-      renderRoute();
-    }})
-  }));
-
   ui.body.append(list);
   root.append(ui.root);
 
@@ -437,20 +423,4 @@ export async function render(root){
   await refreshDocsStatus();
   await refreshLatency();
   await refreshSnapcastStatus();
-}
-
-function paletteName(key){
-  return {
-    blue: "Bleu",
-    amber: "Ambre",
-    emerald: "Émeraude",
-    rose: "Rose",
-    slate: "Ardoise"
-  }[key] || key;
-}
-
-function nextPalette(current){
-  const list = ["blue", "amber", "emerald", "rose", "slate"];
-  const idx = list.indexOf(current);
-  return list[(idx + 1) % list.length];
 }

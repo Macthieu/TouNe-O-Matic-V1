@@ -38,8 +38,8 @@ registerRoute("about",     { title: "À propos", render: About.render });
 registerRoute("search",    { title: "Recherche", render: Search.render });
 
 // Init UI
-applyTheme(store.get().ui.theme, store.get().ui.palette);
-store.subscribe((st)=>applyTheme(st.ui.theme, st.ui.palette));
+applyTheme(store.get().ui.theme);
+store.subscribe((st)=>applyTheme(st.ui.theme));
 
 // Build mock library (fallback for empty or unavailable API)
 const lib = buildMockLibrary();
@@ -295,9 +295,8 @@ renderPlayerBar(store.get().player);
 renderQueuePane(store.get().player);
 renderHeader(store.get().player);
 
-function applyTheme(theme, palette){
+function applyTheme(theme){
   document.documentElement.dataset.theme = theme;
-  document.documentElement.dataset.palette = palette || "blue";
 }
 
 async function loadLibrary(){
