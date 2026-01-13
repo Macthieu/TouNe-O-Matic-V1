@@ -86,6 +86,11 @@ export async function render(root){
     ev.stopPropagation();
     await startDocsFetch();
   }});
+  const btnDocsForce = button("Forcer", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    if(!window.confirm("Forcer va réécrire les fichiers existants. Continuer ?")) return;
+    await startDocsFetch(true);
+  }});
   const btnDocsExport = button("Exporter logs (JSON)", {onClick:(ev)=>{
     ev.stopPropagation();
     exportLogs(docsLogs, "docs-logs.json");
@@ -108,7 +113,7 @@ export async function render(root){
   const docsActions = document.createElement("div");
   docsActions.style.display = "flex";
   docsActions.style.gap = "8px";
-  docsActions.append(btnDocs, btnDocsExport);
+  docsActions.append(btnDocs, btnDocsForce, btnDocsExport);
   docsWrap.append(docsProgress, docsStats, docsErr, docsLogBox, docsActions);
   docs.body.append(docsWrap);
   root.append(docs.root);
@@ -221,10 +226,11 @@ export async function render(root){
     return [];
   }
 
-  async function startDocsFetch(){
+  async function startDocsFetch(force=false){
     if(AppConfig.transport !== "rest") return;
     try {
-      await fetch(`${AppConfig.restBaseUrl}/docs/fetch`, {method: "POST"});
+      const url = `${AppConfig.restBaseUrl}/docs/fetch${force ? "?force=1" : ""}`;
+      await fetch(url, {method: "POST"});
     } catch {}
     await refreshDocsStatus();
   }

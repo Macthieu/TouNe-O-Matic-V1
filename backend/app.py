@@ -99,6 +99,13 @@ def _db_connect():
     return conn
 
 
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str]):
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    for col, coltype in columns.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
+
+
 def _init_db():
     schema = """
     CREATE TABLE IF NOT EXISTS track (
@@ -138,13 +145,6 @@ def _init_db():
             "composer": "TEXT",
             "work": "TEXT",
         })
-
-
-def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str]):
-    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-    for col, coltype in columns.items():
-        if col not in existing:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
 
 
 _init_db()
@@ -530,6 +530,33 @@ def mpd_clear():
         return err("clear failed", 500, detail=str(e))
 
 
+@app.post("/api/mpd/move")
+def mpd_move():
+    frm = request.args.get("from")
+    to = request.args.get("to")
+    if frm is None or to is None:
+        return err("missing ?from=&to=")
+    try:
+        with mpd_client() as c:
+            c.move(int(frm), int(to))
+            return ok()
+    except Exception as e:
+        return err("move failed", 500, detail=str(e))
+
+
+@app.post("/api/mpd/delete")
+def mpd_delete():
+    pos = request.args.get("pos")
+    if pos is None:
+        return err("missing ?pos=")
+    try:
+        with mpd_client() as c:
+            c.delete(int(pos))
+            return ok()
+    except Exception as e:
+        return err("delete failed", 500, detail=str(e))
+
+
 @app.post("/api/mpd/add")
 def mpd_add():
     # expect ?path=Artist/Album/Track.flac (path MPD relatif au music_directory)
@@ -603,6 +630,31 @@ def library_search():
         return ok(rows, count=len(rows))
     except Exception as e:
         return err("search failed", 500, detail=str(e))
+
+
+@app.post("/api/library/queue/random-next")
+def library_queue_random_next():
+    try:
+        with _db_connect() as conn:
+            row = conn.execute(
+                "SELECT path, title, artist, album FROM track ORDER BY RANDOM() LIMIT 1"
+            ).fetchone()
+        if not row:
+            return err("no tracks available", 404)
+        with mpd_client() as c:
+            status = c.status()
+            song = status.get("song")
+            sid = c.addid(row["path"])
+            if song is not None:
+                try:
+                    c.moveid(sid, int(song) + 1)
+                except Exception:
+                    pass
+            else:
+                c.play()
+        return ok({"path": row["path"], "title": row["title"], "artist": row["artist"], "album": row["album"]})
+    except Exception as e:
+        return err("random-next failed", 500, detail=str(e))
 
 
 @app.get("/api/library/summary")
@@ -774,6 +826,31 @@ def playlists_append():
             if path:
                 f.write(f"{path}\n")
     return ok({"name": p.name, "added": len(paths)})
+
+
+@app.post("/api/playlists/remove")
+def playlists_remove():
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    path = (data.get("path") or "").strip()
+    if not name or not path:
+        return err("missing name/path")
+    p = _playlist_path(name)
+    if not p.exists():
+        return err("playlist not found", 404)
+    try:
+        lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+        kept = []
+        removed = 0
+        for ln in lines:
+            if ln.strip() == path:
+                removed += 1
+                continue
+            kept.append(ln)
+        p.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+        return ok({"name": p.name, "removed": removed})
+    except Exception as e:
+        return err("remove failed", 500, detail=str(e))
 
 
 @app.post("/api/playlists/load")
@@ -1045,6 +1122,8 @@ def _docs_fetch_worker(force: bool = False):
     if not GOOGLE_CSE_API_KEY or not GOOGLE_CSE_CX:
         _log_event(DOCS_STATE, "warn", "Google CSE non configuré (photos artistes)")
     try:
+        photos_dir = DOCS_ROOT / "Photos d'artiste"
+        force_photos = force or _dir_empty(photos_dir)
         with _db_connect() as conn:
             artists = [r["name"] for r in conn.execute("SELECT DISTINCT artist as name FROM track WHERE artist IS NOT NULL")]
             albums = conn.execute(
@@ -1055,7 +1134,7 @@ def _docs_fetch_worker(force: bool = False):
 
         DOCS_STATE["phase"] = "artists"
         for name in artists:
-            _fetch_artist_docs(name, force)
+            _fetch_artist_docs(name, force, force_photos)
             DOCS_STATE["done_artists"] += 1
             time.sleep(0.2)
 
@@ -1075,7 +1154,7 @@ def _docs_fetch_worker(force: bool = False):
         _log_event(DOCS_STATE, "info", "Récupération web terminée")
 
 
-def _fetch_artist_docs(name: str, force: bool):
+def _fetch_artist_docs(name: str, force: bool, force_photo: bool = False):
     safe = _safe_name(name)
     bio_path = DOCS_ROOT / "Biographies" / f"{safe}.txt"
     photo_path = DOCS_ROOT / "Photos d'artiste" / f"{safe}.jpg"
@@ -1094,9 +1173,14 @@ def _fetch_artist_docs(name: str, force: bool):
         else:
             _log_event(DOCS_STATE, "warn", "Bio introuvable", artist=name)
 
-    if photo_path.exists() and not force:
-        _log_event(DOCS_STATE, "info", "Photo déjà présente", artist=name)
-    else:
+    photo_ok = photo_path.exists() and photo_path.stat().st_size > 8_000 and not photo_path.is_dir()
+    if photo_ok and not (force or force_photo):
+        if _is_placeholder_file(photo_path):
+            _log_event(DOCS_STATE, "warn", "Photo placeholder détectée, relance", artist=name)
+            photo_ok = False
+        else:
+            _log_event(DOCS_STATE, "info", "Photo déjà présente", artist=name)
+    if (not photo_ok) or force or force_photo:
         img_url, source = _get_artist_photo(name)
         if img_url:
             if _download_image(img_url, photo_path):
@@ -1170,6 +1254,9 @@ def _get_artist_photo(name: str) -> Tuple[Optional[str], str]:
     url = _lastfm_artist_image(name)
     if url:
         return url, "lastfm"
+    url = _lastfm_artist_image(name, autocorrect=True)
+    if url:
+        return url, "lastfm"
     url = _discogs_artist_image(name)
     if url:
         return url, "discogs"
@@ -1216,6 +1303,37 @@ def _get_album_cover(artist: str, album: str) -> Tuple[Optional[str], str]:
     return None, ""
 
 
+def _is_lastfm_placeholder(url: str) -> bool:
+    if not url:
+        return False
+    lower = url.lower()
+    return "2a96cbd8b46e442fc41c2b86b821562f" in lower or "noimage" in lower
+
+
+def _is_placeholder_file(path: Path) -> bool:
+    try:
+        with Image.open(path) as img:
+            img = img.convert("RGB").resize((12, 12))
+            pixels = list(img.getdata())
+        if not pixels:
+            return False
+        grays = [int(0.299 * r + 0.587 * g + 0.114 * b) for r, g, b in pixels]
+        avg = sum(grays) / len(grays)
+        var = sum((g - avg) ** 2 for g in grays) / len(grays)
+        return avg > 220 and var < 80
+    except Exception:
+        return False
+
+
+def _dir_empty(path: Path) -> bool:
+    try:
+        if not path.exists():
+            return True
+        return not any(path.iterdir())
+    except Exception:
+        return False
+
+
 def _wikipedia_summary(title: str, lang: str) -> Optional[str]:
     try:
         url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(title)}"
@@ -1230,14 +1348,67 @@ def _wikipedia_summary(title: str, lang: str) -> Optional[str]:
 
 def _wikipedia_image(title: str, lang: str) -> Optional[str]:
     try:
-        url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(title)}"
-        res = requests.get(url, timeout=10)
-        if res.status_code != 200:
-            return None
-        data = res.json()
-        return data.get("thumbnail", {}).get("source")
+        img = _wikipedia_page_image(title, lang)
+        if img:
+            return img
+        img = _wikipedia_summary_image(title, lang)
+        if img:
+            return img
+        alt = _wikipedia_search_title(title, lang)
+        if alt and alt.lower() != title.lower():
+            img = _wikipedia_page_image(alt, lang) or _wikipedia_summary_image(alt, lang)
+            if img:
+                return img
     except Exception:
         return None
+    return None
+
+
+def _wikipedia_page_image(title: str, lang: str) -> Optional[str]:
+    url = f"https://{lang}.wikipedia.org/w/api.php"
+    params = {
+        "action": "query",
+        "prop": "pageimages",
+        "titles": title,
+        "pithumbsize": 800,
+        "format": "json",
+        "redirects": 1,
+    }
+    res = requests.get(url, params=params, timeout=10)
+    if res.status_code != 200:
+        return None
+    pages = res.json().get("query", {}).get("pages", {})
+    for page in pages.values():
+        thumb = page.get("thumbnail", {}).get("source")
+        if thumb:
+            return thumb
+    return None
+
+
+def _wikipedia_summary_image(title: str, lang: str) -> Optional[str]:
+    url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(title)}"
+    res = requests.get(url, timeout=10)
+    if res.status_code != 200:
+        return None
+    data = res.json()
+    return (data.get("originalimage", {}) or data.get("thumbnail", {})).get("source")
+
+
+def _wikipedia_search_title(query: str, lang: str) -> Optional[str]:
+    url = f"https://{lang}.wikipedia.org/w/api.php"
+    params = {
+        "action": "opensearch",
+        "search": query,
+        "limit": 1,
+        "namespace": 0,
+        "format": "json",
+    }
+    res = requests.get(url, params=params, timeout=10)
+    if res.status_code != 200:
+        return None
+    data = res.json()
+    titles = data[1] if isinstance(data, list) and len(data) > 1 else []
+    return titles[0] if titles else None
 
 
 def _lastfm_artist_bio(name: str, lang: str = "fr") -> Optional[str]:
@@ -1261,19 +1432,29 @@ def _lastfm_artist_bio(name: str, lang: str = "fr") -> Optional[str]:
         return None
 
 
-def _lastfm_artist_image(name: str) -> Optional[str]:
+def _lastfm_artist_image(name: str, autocorrect: bool = False) -> Optional[str]:
     if not LASTFM_API_KEY:
         return None
     try:
         url = "https://ws.audioscrobbler.com/2.0/"
-        params = {"method": "artist.getinfo", "artist": name, "api_key": LASTFM_API_KEY, "format": "json"}
+        params = {
+            "method": "artist.getinfo",
+            "artist": name,
+            "api_key": LASTFM_API_KEY,
+            "format": "json",
+        }
+        if autocorrect:
+            params["autocorrect"] = 1
         res = requests.get(url, params=params, timeout=10)
         if res.status_code != 200:
             return None
         images = res.json().get("artist", {}).get("image", [])
         for img in reversed(images):
             if img.get("#text"):
-                return img.get("#text")
+                url = img.get("#text")
+                if _is_lastfm_placeholder(url):
+                    continue
+                return url
     except Exception:
         return None
     return None
@@ -1313,7 +1494,10 @@ def _lastfm_album_image(artist: str, album: str) -> Optional[str]:
         images = res.json().get("album", {}).get("image", [])
         for img in reversed(images):
             if img.get("#text"):
-                return img.get("#text")
+                url = img.get("#text")
+                if _is_lastfm_placeholder(url):
+                    continue
+                return url
     except Exception:
         return None
     return None
@@ -1468,7 +1652,12 @@ def _download_image(url: str, dest: Path) -> bool:
             return False
         res.raw.decode_content = True
         img = Image.open(res.raw).convert("RGB")
-        img.save(dest, "JPEG", quality=90, optimize=True)
+        tmp = dest.with_suffix(".tmp.jpg")
+        img.save(tmp, "JPEG", quality=90, optimize=True)
+        if tmp.stat().st_size < 1024:
+            tmp.unlink(missing_ok=True)
+            return False
+        tmp.replace(dest)
         return True
     except Exception:
         return False

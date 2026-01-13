@@ -674,6 +674,11 @@ input[type="range"]{ accent-color: var(--accent); }
   cursor:pointer;
 }
 .btn:hover{ background: rgba(255,255,255,.07); }
+.btn.is-active{
+  border-color: rgba(59,130,246,.5);
+  background: rgba(59,130,246,.2);
+  color: #dbeafe;
+}
 .btn.primary{ border-color: rgba(59,130,246,.35); background: rgba(59,130,246,.16); }
 .btn.danger{ border-color: rgba(255,77,77,.35); background: rgba(255,77,77,.14); }
 .pill{ padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border); background: rgba(255,255,255,.04); font-size: 12px; }

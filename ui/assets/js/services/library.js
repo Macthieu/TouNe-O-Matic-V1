@@ -55,6 +55,48 @@ export async function queuePlaylist(name){
   }
 }
 
+export async function queueRandomNext(){
+  if(AppConfig.transport !== "rest") return;
+  try {
+    const res = await fetch(`${AppConfig.restBaseUrl}/library/queue/random-next`, {method: "POST"});
+    const body = await res.json().catch(()=>null);
+    if(!res.ok || body?.ok === false){
+      throw new Error(body?.error || `HTTP ${res.status}`);
+    }
+    toast("Suivant aléatoire ajouté");
+  } catch {
+    toast("Erreur: suivant aléatoire");
+  }
+}
+
+export async function moveQueue(from, to){
+  if(from === to) return;
+  try {
+    const url = `${AppConfig.restBaseUrl}/mpd/move?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+    await fetch(url, {method: "POST"});
+  } catch {
+    toast("Erreur: déplacement file");
+  }
+}
+
+export async function deleteQueue(pos){
+  try {
+    const url = `${AppConfig.restBaseUrl}/mpd/delete?pos=${encodeURIComponent(pos)}`;
+    await fetch(url, {method: "POST"});
+  } catch {
+    toast("Erreur: suppression file");
+  }
+}
+
+export async function removeFromPlaylist(name, path){
+  try {
+    await postJson("/playlists/remove", {name, path});
+    toast("Piste retirée");
+  } catch {
+    toast("Erreur: suppression playlist");
+  }
+}
+
 export function showAddMenu(targetEl, {title, paths}){
   if(!paths || !paths.length){
     toast("Aucun titre à ajouter");

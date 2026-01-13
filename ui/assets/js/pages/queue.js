@@ -2,13 +2,24 @@ import { card, listRow, coverEl, button } from "../components/ui.js";
 import { AppConfig } from "../config.js";
 import { store } from "../store.js";
 import { toast } from "../utils.js";
+import { moveQueue, deleteQueue } from "../services/library.js";
 
 export async function render(root){
   const st = store.get();
+  const mixBtn = button("Mix", {onClick: async ()=>{
+    const next = !store.get().player.random;
+    try {
+      await fetch(`${AppConfig.restBaseUrl}/mpd/random?value=${next ? 1 : 0}`, {method: "POST"});
+    } catch {}
+  }});
+  mixBtn.classList.toggle("is-active", !!st.player.random);
   const c = card({
     title:"File d’attente",
     subtitle:"Drag & drop (démo UI)",
-    actions:[button("Ouvrir en bas", {onClick: ()=>document.getElementById("btnQueue")?.click()})]
+    actions:[
+      mixBtn,
+      button("Ouvrir en bas", {onClick: ()=>document.getElementById("btnQueue")?.click()})
+    ]
   });
 
   const help = document.createElement("div");
@@ -50,13 +61,14 @@ export async function render(root){
       row.style.outline = "2px solid rgba(124,58,237,.35)";
     });
     row.addEventListener("dragleave", ()=>row.style.outline = "");
-    row.addEventListener("drop", ev=>{
+    row.addEventListener("drop", async ev=>{
       ev.preventDefault();
       row.style.outline = "";
       const from = Number(ev.dataTransfer.getData("text/plain"));
       const to = i;
       if(Number.isFinite(from) && from!==to){
-        toast(`Démo : déplacer ${from+1} → ${to+1}`);
+        await moveQueue(from, to);
+        toast(`Déplacé ${from+1} → ${to+1}`);
       }
     });
     list.append(row);
@@ -64,6 +76,10 @@ export async function render(root){
 
   c.body.append(list);
   root.append(c.root);
+
+  store.subscribe((next)=>{
+    mixBtn.classList.toggle("is-active", !!next.player.random);
+  });
 }
 
 function albumArtUrl(track, size){

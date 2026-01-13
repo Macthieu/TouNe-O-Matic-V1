@@ -1,7 +1,7 @@
 import { store } from "../store.js";
 import { el } from "../utils.js";
 import { navigate } from "../router.js";
-import { playPaths, showAddMenu, playPlaylist, queuePlaylist } from "../services/library.js";
+import { playPaths, showAddMenu } from "../services/library.js";
 
 function row(icon, title, subtitle, onClick, trailing = "⋮"){
   const a = document.createElement("button");
@@ -71,9 +71,12 @@ export async function render(root, params){
 
     body.appendChild(el("div", { className: "card" }, [
       el("div", { className: "card__title" }, ["Catégories"]),
-      el("div", { className: "list" }, categories.map(c =>
-        row(c.icon, c.title, "", ()=>navigate("music", new URLSearchParams({cat: c.key})))
-      ))
+      el("div", { className: "list" }, categories.map(c =>{
+        const handler = c.key === "playlists"
+          ? ()=>navigate("playlists")
+          : ()=>navigate("music", new URLSearchParams({cat: c.key}));
+        return row(c.icon, c.title, "", handler);
+      }))
     ]));
     return;
   }
@@ -221,23 +224,7 @@ export async function render(root, params){
   }
 
   if(cat === "playlists"){
-    const items = (st.library.playlists || []).slice();
-    body.appendChild(el("div", { className: "card" }, [
-      el("div", { className: "card__title" }, ["Playlists"]),
-      el("div", { className: "list" }, items.map(pl =>{
-        const actions = el("div", { className: "row__actions" }, [
-          actionBtn("▶", "Lire la playlist", async (ev)=>{
-            ev.stopPropagation();
-            await playPlaylist(pl.name);
-          }),
-          actionBtn("+", "Ajouter la playlist", async (ev)=>{
-            ev.stopPropagation();
-            await queuePlaylist(pl.name);
-          }),
-        ]);
-        return rowWithActions("📋", pl.name, `${pl.tracks} titres`, ()=>{}, actions);
-      }))
-    ]));
+    navigate("playlists");
     return;
   }
 

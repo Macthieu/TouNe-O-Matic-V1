@@ -2,6 +2,7 @@ import { card, coverEl, button, pill, listRow } from "../components/ui.js";
 import { AppConfig } from "../config.js";
 import { store } from "../store.js";
 import { formatTime, toast } from "../utils.js";
+import { queueRandomNext } from "../services/library.js";
 
 export async function render(root){
   const st = store.get();
@@ -41,6 +42,8 @@ export async function render(root){
     <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px">
       <button class="btn primary" id="npPlay">${st.player.state === "play" ? "Pause" : "Lecture"}</button>
       <button class="btn" id="npNext">Suivant</button>
+      <button class="btn" id="npMix">Mix</button>
+      <button class="btn" id="npRandomNext">Suivant aléatoire</button>
       <button class="btn" id="npAdd">Ajouter à une playlist</button>
       <button class="btn" id="npFav">${tr?.fav ? "Retirer des favoris" : "Ajouter aux favoris"}</button>
     </div>
@@ -75,6 +78,20 @@ export async function render(root){
   // wire buttons (UI only; real control is in app.js via transport)
   c.root.querySelector("#npPlay")?.addEventListener("click", ()=>document.getElementById("btnPlayPause")?.click());
   c.root.querySelector("#npNext")?.addEventListener("click", ()=>document.getElementById("btnNext")?.click());
+  c.root.querySelector("#npRandomNext")?.addEventListener("click", queueRandomNext);
+  const mixBtn = c.root.querySelector("#npMix");
+  if(mixBtn){
+    mixBtn.classList.toggle("is-active", !!st.player.random);
+    mixBtn.addEventListener("click", async ()=>{
+      const next = !store.get().player.random;
+      try {
+        await fetch(`${AppConfig.restBaseUrl}/mpd/random?value=${next ? 1 : 0}`, {method: "POST"});
+      } catch {}
+    });
+    store.subscribe((next)=>{
+      mixBtn.classList.toggle("is-active", !!next.player.random);
+    });
+  }
   c.root.querySelector("#npAdd")?.addEventListener("click", ()=>toast("Démo : ajout playlist plus tard."));
   c.root.querySelector("#npFav")?.addEventListener("click", ()=>toast("Démo : favoris plus tard."));
 }

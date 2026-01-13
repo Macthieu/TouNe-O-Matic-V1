@@ -3,7 +3,7 @@ import { AppConfig } from "../config.js";
 import { store } from "../store.js";
 import { formatTime, toast } from "../utils.js";
 import { navigate } from "../router.js";
-import { playPaths, showAddMenu, playPlaylist, queuePlaylist } from "../services/library.js";
+import { playPaths, showAddMenu, playPlaylist, queuePlaylist, removeFromPlaylist } from "../services/library.js";
 
 export async function render(root, params){
   const name = params?.get("name") || "";
@@ -17,12 +17,25 @@ export async function render(root, params){
   list.className = "list";
 
   for(const p of store.get().library.playlists){
-    list.append(listRow({
+    const cover = coverEl("sm", p.name);
+    hydratePlaylistCover(cover, p.name);
+    const actions = document.createElement("div");
+    actions.className = "row__actions";
+    actions.append(
+      actionBtn("▶", "Lecture + file", async (ev)=>{
+        ev.stopPropagation();
+        await playPlaylist(p.name);
+      }),
+      button("Ouvrir", {onClick:(ev)=>{ev.stopPropagation(); navigate("playlists", new URLSearchParams({name: p.name}));}})
+    );
+    const row = listRow({
       title: p.name,
       subtitle: `${p.tracks} titres`,
-      left: coverEl("sm", p.name),
-      right: button("Ouvrir", {onClick:(ev)=>{ev.stopPropagation(); navigate("playlists", new URLSearchParams({name: p.name}));}})
-    }));
+      left: cover,
+      right: actions,
+      onClick: ()=>navigate("playlists", new URLSearchParams({name: p.name}))
+    });
+    list.append(row);
   }
 
   c.body.append(list);
@@ -56,7 +69,13 @@ async function renderPlaylistDetail(root, name){
         right: actionBtn("▶", "Lire", (ev)=>{ev.stopPropagation(); playPaths([t.path].filter(Boolean));}),
       });
       const addBtn = actionBtn("+", "Ajouter", (ev)=>{ev.stopPropagation(); showAddMenu(ev.currentTarget, {title: t.title, paths:[t.path].filter(Boolean)});});
+      const delBtn = actionBtn("🗑", "Supprimer", async (ev)=>{
+        ev.stopPropagation();
+        await removeFromPlaylist(name, t.path);
+        await renderPlaylistDetail(root, name);
+      });
       row.append(addBtn);
+      row.append(delBtn);
       list.append(row);
     });
   }
@@ -85,4 +104,17 @@ async function fetchPlaylistInfo(name){
     if(body?.ok && body.data?.tracks) return body.data.tracks;
   } catch {}
   return [];
+}
+
+async function hydratePlaylistCover(coverEl, name){
+  const tracks = await fetchPlaylistInfo(name);
+  const first = tracks[0];
+  if(!first?.artist || !first?.album) return;
+  const url = new URL(`${AppConfig.restBaseUrl}/docs/album/art`, window.location.origin);
+  url.searchParams.set("artist", first.artist);
+  url.searchParams.set("album", first.album);
+  url.searchParams.set("size", "140");
+  coverEl.style.backgroundImage = `url("${url.toString()}")`;
+  coverEl.style.backgroundSize = "cover";
+  coverEl.style.backgroundPosition = "center";
 }
