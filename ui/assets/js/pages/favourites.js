@@ -4,15 +4,17 @@ import { store } from "../store.js";
 import { playPaths, playPlaylist, removeFavourite, fetchFavourites } from "../services/library.js";
 
 export async function render(root){
-  const favs = store.get().library.favourites || [];
-
   const c = card({ title:"Favoris", subtitle:"Pistes / playlists" });
   const list = document.createElement("div");
   list.className = "list";
 
-  if(!favs.length){
-    list.innerHTML = '<div class="muted">Aucun favori.</div>';
-  } else {
+  function renderList(){
+    const favs = store.get().library.favourites || [];
+    list.innerHTML = "";
+    if(!favs.length){
+      list.innerHTML = '<div class="muted">Aucun favori.</div>';
+      return;
+    }
     for(const f of favs){
       const cover = coverEl("sm", f.title || "");
       if(f.type === "track" && f.artist && f.album){
@@ -48,4 +50,14 @@ export async function render(root){
 
   c.body.append(list);
   root.append(c.root);
+
+  renderList();
+  await fetchFavourites();
+  const unsubscribe = store.subscribe(()=>{
+    if(!root.contains(c.root)){
+      unsubscribe();
+      return;
+    }
+    renderList();
+  });
 }

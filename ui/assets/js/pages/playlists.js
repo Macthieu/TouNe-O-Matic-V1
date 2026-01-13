@@ -25,31 +25,48 @@ export async function render(root, params){
 
   const list = document.createElement("div");
   list.className = "list";
-
-  for(const p of store.get().library.playlists){
-    const cover = coverEl("sm", p.name);
-    hydratePlaylistCover(cover, p.name);
-    const actions = document.createElement("div");
-    actions.className = "row__actions";
-    actions.append(
-      actionBtn("▶", "Lecture + file", async (ev)=>{
+  function renderList(){
+    list.innerHTML = "";
+    for(const p of store.get().library.playlists){
+      const cover = coverEl("sm", p.name);
+      hydratePlaylistCover(cover, p.name);
+      const actions = document.createElement("div");
+      actions.className = "row__actions";
+      actions.append(
+        actionBtn("▶", "Lecture + file", async (ev)=>{
+          ev.stopPropagation();
+          await playPlaylist(p.name);
+        }),
+        button("Ouvrir", {onClick:(ev)=>{ev.stopPropagation(); navigate("playlists", new URLSearchParams({name: p.name}));}})
+      );
+      const delBtn = actionBtn("🗑", "Supprimer", async (ev)=>{
         ev.stopPropagation();
-        await playPlaylist(p.name);
-      }),
-      button("Ouvrir", {onClick:(ev)=>{ev.stopPropagation(); navigate("playlists", new URLSearchParams({name: p.name}));}})
-    );
-    const row = listRow({
-      title: p.name,
-      subtitle: `${p.tracks} titres`,
-      left: cover,
-      right: actions,
-      onClick: ()=>navigate("playlists", new URLSearchParams({name: p.name}))
-    });
-    list.append(row);
+        if(!window.confirm(`Supprimer ${p.name} ?`)) return;
+        await deletePlaylist(p.name);
+      });
+      actions.append(delBtn);
+      const row = listRow({
+        title: p.name,
+        subtitle: `${p.tracks} titres`,
+        left: cover,
+        right: actions,
+        onClick: ()=>navigate("playlists", new URLSearchParams({name: p.name}))
+      });
+      list.append(row);
+    }
   }
 
   c.body.append(list);
   root.append(c.root);
+
+  renderList();
+  const unsubscribe = store.subscribe(()=>{
+    if(!root.contains(c.root)){
+      unsubscribe();
+      return;
+    }
+    renderList();
+  });
 }
 
 async function renderPlaylistDetail(root, name){
@@ -83,11 +100,14 @@ async function renderPlaylistDetail(root, name){
     list.innerHTML = '<div class="muted">Playlist vide ou introuvable.</div>';
   } else {
     items.forEach((t, idx)=>{
+      const actions = document.createElement("div");
+      actions.className = "row__actions";
+      actions.append(actionBtn("▶", "Lire", (ev)=>{ev.stopPropagation(); playPaths([t.path].filter(Boolean));}));
       const row = listRow({
         title: t.title || "—",
         subtitle: `${t.artist || "—"} • ${t.album || "—"}`,
         left: coverEl("sm", t.title || ""),
-        right: actionBtn("▶", "Lire", (ev)=>{ev.stopPropagation(); playPaths([t.path].filter(Boolean));}),
+        right: actions,
         draggable: true,
         data: {i: idx}
       });
@@ -97,8 +117,8 @@ async function renderPlaylistDetail(root, name){
         await removeFromPlaylist(name, t.path);
         await renderPlaylistDetail(root, name);
       });
-      row.append(addBtn);
-      row.append(delBtn);
+      actions.append(addBtn);
+      actions.append(delBtn);
       row.addEventListener("dragstart", ev=>{
         ev.dataTransfer.setData("text/plain", String(idx));
         ev.dataTransfer.effectAllowed = "move";
