@@ -3,7 +3,7 @@ import { AppConfig } from "../config.js";
 import { store } from "../store.js";
 import { formatTime, toast } from "../utils.js";
 import { navigate } from "../router.js";
-import { playPaths, showAddMenu, playPlaylist, queuePlaylist, removeFromPlaylist, moveInPlaylist, renamePlaylist, deletePlaylist, createPlaylist, importPlaylistFile } from "../services/library.js";
+import { playPaths, showAddMenu, playPlaylist, queuePlaylist, removeFromPlaylist, moveInPlaylist, renamePlaylist, deletePlaylist, createPlaylist, importPlaylistFile, repairPlaylist } from "../services/library.js";
 
 const playlistCoverCache = new Map();
 const playlistCoverInFlight = new Map();
@@ -20,18 +20,70 @@ export async function render(root, params){
   const actions = document.createElement("div");
   actions.style.display = "flex";
   actions.style.gap = "8px";
+  actions.style.alignItems = "center";
+  const batchStatus = document.createElement("div");
+  batchStatus.className = "muted";
+  batchStatus.style.fontSize = "12px";
+  batchStatus.style.marginLeft = "4px";
+  const batchProgress = document.createElement("div");
+  batchProgress.className = "progress";
+  batchProgress.style.display = "none";
+  const batchBar = document.createElement("div");
+  batchBar.className = "progress__bar";
+  batchProgress.append(batchBar);
   actions.append(button("Nouvelle playlist", {onClick: async ()=>{
     const name = window.prompt("Nom de la nouvelle playlist");
     if(!name) return;
     await createPlaylist(name);
   }}));
   actions.append(button("Importer (.m3u)", {onClick: ()=>openImportDialog()}));
+  actions.append(button("Réparer tout", {onClick: async ()=>{
+    const items = store.get().library.playlists || [];
+    if(!items.length){
+      toast("Aucune playlist à réparer");
+      return;
+    }
+    if(!window.confirm(`Réparer ${items.length} playlists ?`)) return;
+    let updated = 0;
+    let total = 0;
+    let failed = 0;
+    const startedAt = Date.now();
+    batchStatus.textContent = `Réparation: 0/${items.length} (ETA --:--)`;
+    batchProgress.style.display = "inline-flex";
+    batchBar.style.width = "0%";
+    for(let i = 0; i < items.length; i += 1){
+      const pl = items[i];
+      const res = await repairPlaylist(pl.name);
+      if(res?.ok){
+        updated += res.data?.updated || 0;
+        total += res.data?.tracks_in_file || 0;
+      } else {
+        failed += 1;
+      }
+      const done = i + 1;
+      const pct = Math.round((done / items.length) * 100);
+      const elapsedMs = Date.now() - startedAt;
+      const avgMs = done ? (elapsedMs / done) : 0;
+      const remainingMs = Math.max(0, Math.round(avgMs * (items.length - done)));
+      const etaSec = Math.round(remainingMs / 1000);
+      const etaMin = Math.floor(etaSec / 60);
+      const etaRem = String(etaSec % 60).padStart(2, "0");
+      batchStatus.textContent = `Réparation: ${done}/${items.length} (ETA ${etaMin}:${etaRem})`;
+      batchBar.style.width = `${pct}%`;
+    }
+    const failMsg = failed ? ` (${failed} échec${failed > 1 ? "s" : ""})` : "";
+    toast(`Réparation terminée: ${updated}/${total}${failMsg}`);
+    batchStatus.textContent = "";
+    batchProgress.style.display = "none";
+  }}));
   actions.append(button("Rafraîchir pochettes", {onClick: ()=>{
     playlistCoverCache.clear();
     playlistCoverInFlight.clear();
     lastPlaylistSig = "";
     renderList();
   }}));
+  actions.append(batchProgress);
+  actions.append(batchStatus);
   c.body.append(actions);
 
   const list = document.createElement("div");
@@ -104,6 +156,13 @@ async function renderPlaylistDetail(root, name){
   header.append(
     button("Lecture", {onClick: async ()=>playPlaylist(name)}),
     button("Ajouter à la file", {onClick: async ()=>queuePlaylist(name)}),
+    button("Réparer", {onClick: async ()=>{
+      const res = await repairPlaylist(name);
+      if(res?.ok){
+        toast(`Réparé: ${res.data.updated || 0} / ${res.data.tracks_in_file || 0}`);
+        await renderPlaylistDetail(root, name);
+      }
+    }}),
     button("Renommer", {onClick: async ()=>{
       const next = window.prompt("Nouveau nom", name);
       if(!next || next === name) return;
