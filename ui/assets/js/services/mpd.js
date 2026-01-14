@@ -186,7 +186,8 @@ export class MPDClient {
 
   async _refresh(){
     try {
-      let status = await this._fetchJson("/state").catch(()=>null);
+      let wrapper = await this._fetchJson("/state").catch(()=>null);
+      let status = wrapper?.state || wrapper;
       if(!status?.status){
         status = await this._fetchJson("/mpd/status");
       }

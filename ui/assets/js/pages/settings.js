@@ -118,10 +118,71 @@ export async function render(root){
   docs.body.append(docsWrap);
   root.append(docs.root);
 
+  const cmdCard = card({ title:"Commandes", subtitle:"Historique daemon" });
+  const cmdWrap = document.createElement("div");
+  cmdWrap.style.display = "grid";
+  cmdWrap.style.gap = "10px";
+
+  const cmdLogBox = document.createElement("div");
+  cmdLogBox.className = "logbox";
+  cmdLogBox.hidden = true;
+  const cmdLogPre = document.createElement("pre");
+  cmdLogPre.className = "logbox__pre";
+  cmdLogBox.append(cmdLogPre);
+
+  const cmdActions = document.createElement("div");
+  cmdActions.style.display = "flex";
+  cmdActions.style.gap = "8px";
+  const cmdRefresh = button("Rafraîchir", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    cmdLogs = await fetchCmdLogs();
+    renderLogs(cmdLogBox, cmdLogPre, cmdLogs, false);
+  }});
+  const cmdExport = button("Exporter logs (JSON)", {onClick:(ev)=>{
+    ev.stopPropagation();
+    exportLogs(cmdLogs, "cmd-logs.json");
+  }});
+  cmdActions.append(cmdRefresh, cmdExport);
+
+  cmdWrap.append(cmdLogBox, cmdActions);
+  cmdCard.body.append(cmdWrap);
+  root.append(cmdCard.root);
+
+  const sources = card({ title:"Sources audio", subtitle:"AirPlay, Spotify, Snapclient" });
+  const sourcesWrap = document.createElement("div");
+  sourcesWrap.style.display = "grid";
+  sourcesWrap.style.gap = "10px";
+  const sourcesList = document.createElement("div");
+  sourcesList.className = "list";
+  sourcesWrap.append(sourcesList);
+  sources.body.append(sourcesWrap);
+  root.append(sources.root);
+
   const multi = card({ title:"Multiroom (Snapcast)", subtitle:"Latence clients (ms)" });
   const multiWrap = document.createElement("div");
   multiWrap.style.display = "grid";
   multiWrap.style.gap = "10px";
+  const streamRow = document.createElement("div");
+  streamRow.style.display = "grid";
+  streamRow.style.gridTemplateColumns = "1fr auto";
+  streamRow.style.alignItems = "center";
+  streamRow.style.gap = "12px";
+  const streamLabel = document.createElement("div");
+  streamLabel.className = "muted small";
+  streamLabel.textContent = "Source Snapcast: —";
+  const streamSelect = document.createElement("select");
+  streamSelect.className = "input";
+  streamSelect.style.height = "36px";
+  streamSelect.style.padding = "0 10px";
+  streamSelect.style.maxWidth = "320px";
+  const streamApply = button("Appliquer source", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    const nextStream = streamSelect.value;
+    const groupId = streamSelect.getAttribute("data-group");
+    if(!nextStream || !groupId) return;
+    await applyStream(groupId, nextStream);
+  }});
+  streamRow.append(streamSelect, streamApply);
   const multiRow = document.createElement("div");
   multiRow.style.display = "grid";
   multiRow.style.gridTemplateColumns = "1fr auto";
@@ -147,7 +208,7 @@ export async function render(root){
   latencyList.className = "list";
   latencyList.style.marginTop = "8px";
   multiRow.append(latencyRange, latencyApply);
-  multiWrap.append(latencyLabel, multiRow, latencyNote, latencyList);
+  multiWrap.append(streamLabel, streamRow, latencyLabel, multiRow, latencyNote, latencyList);
   multi.body.append(multiWrap);
   root.append(multi.root);
 
@@ -171,6 +232,76 @@ export async function render(root){
   pl.body.append(list2);
   root.append(pl.root);
 
+  const libs = card({ title:"Bibliothèques externes", subtitle:"Détection auto des montages /mnt/media" });
+  const libsWrap = document.createElement("div");
+  libsWrap.style.display = "grid";
+  libsWrap.style.gap = "10px";
+  const libsList = document.createElement("div");
+  libsList.className = "list";
+  const libsInfo = document.createElement("div");
+  libsInfo.className = "muted small";
+  const libsStats = document.createElement("div");
+  libsStats.className = "muted small";
+  const libsResult = document.createElement("div");
+  libsResult.className = "logbox";
+  libsResult.hidden = true;
+  const libsResultPre = document.createElement("pre");
+  libsResultPre.className = "logbox__pre";
+  libsResult.append(libsResultPre);
+  const libsSubdirRow = document.createElement("div");
+  libsSubdirRow.style.display = "flex";
+  libsSubdirRow.style.gap = "8px";
+  libsSubdirRow.style.alignItems = "center";
+  const libsSubdirLabel = document.createElement("div");
+  libsSubdirLabel.className = "muted small";
+  libsSubdirLabel.textContent = "Sous-dossier forcé (optionnel)";
+  const libsSubdirInput = document.createElement("input");
+  libsSubdirInput.className = "input";
+  libsSubdirInput.placeholder = "ex: Musique, Music";
+  libsSubdirInput.style.maxWidth = "220px";
+  const libsActions = document.createElement("div");
+  libsActions.style.display = "flex";
+  libsActions.style.gap = "8px";
+  const btnLibsDry = button("Dry‑run", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    const res = await syncLibraryRoots(true);
+    if(res?.ok){
+      toast(`Dry‑run: +${res.data?.actions?.created || 0} / ~${res.data?.actions?.updated || 0}`);
+      renderLibsResult(res.data);
+    }
+  }});
+  const btnLibsCleanup = button("Supprimer liens obsolètes", {kind:"danger", onClick: async (ev)=>{
+    ev.stopPropagation();
+    if(!window.confirm("Supprimer les liens qui ne correspondent plus aux montages détectés ?")) return;
+    const res = await syncLibraryRoots(false);
+    if(res?.ok){
+      libsData = await fetchLibraryRoots();
+      renderLibraryRoots();
+      toast("Liens obsolètes supprimés");
+      renderLibsResult(res.data);
+    }
+  }});
+  const btnLibsDetect = button("Détecter", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    libsData = await fetchLibraryRoots();
+    renderLibraryRoots();
+  }});
+  const btnLibsSync = button("Sync liens", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    const res = await syncLibraryRoots(false);
+    if(res?.ok){
+      libsData = await fetchLibraryRoots();
+      renderLibraryRoots();
+      toast("Liens synchronisés");
+      renderLibsResult(res.data);
+    }
+  }});
+  libsActions.append(btnLibsDry, btnLibsCleanup, btnLibsDetect, btnLibsSync);
+  libsSubdirRow.append(libsSubdirLabel, libsSubdirInput);
+  libsWrap.append(libsInfo, libsStats, libsSubdirRow, libsList, libsResult, libsActions);
+  libs.body.append(libsWrap);
+  root.append(libs.root);
+
   const srv = card({ title:"Serveur", subtitle:"Infos & maintenance (UI only)" });
   srv.body.innerHTML = `
     <div class="muted small">Plus tard : stats, rescan, logs, plugins, etc.</div>
@@ -186,6 +317,9 @@ export async function render(root){
   let pollTimer = null;
   let scanLogs = [];
   let docsLogs = [];
+  let cmdLogs = [];
+  let servicesStatus = [];
+  let libsData = null;
   let lastDocsRunning = false;
   let docsPoll = null;
 
@@ -249,12 +383,29 @@ export async function render(root){
       const body = await res.json();
       if(!body?.ok) return;
       const groups = body.data?.groups || [];
+      const streams = body.data?.streams || [];
       const clients = [];
       groups.forEach((g)=>{
         (g.clients || []).forEach((c)=>{
           clients.push({group: g.name, ...c});
         });
       });
+      if(groups.length && streams.length){
+        const group = groups[0];
+        streamSelect.setAttribute("data-group", group.id || "");
+        streamSelect.innerHTML = "";
+        streams.forEach((s)=>{
+          const opt = document.createElement("option");
+          opt.value = s.id;
+          opt.textContent = s.name || s.id;
+          if(group.stream_id && s.id === group.stream_id) opt.selected = true;
+          streamSelect.append(opt);
+        });
+        streamLabel.textContent = `Source Snapcast: ${group.name || "Groupe"}`;
+      } else {
+        streamSelect.innerHTML = "";
+        streamLabel.textContent = "Source Snapcast: —";
+      }
       if(!clients.length){
         latencyList.innerHTML = '<div class="muted">Aucun client Snapcast connecté.</div>';
         return;
@@ -294,6 +445,177 @@ export async function render(root){
     } catch {
       toast("Erreur Snapcast");
     }
+  }
+
+  async function applyStream(groupId, streamId){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/snapcast/stream`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({group_id: groupId, stream_id: streamId})
+      });
+      const body = await res.json();
+      if(body?.ok){
+        toast("Source Snapcast appliquée");
+        await refreshSnapcastStatus();
+      } else {
+        toast(body?.error || "Erreur Snapcast");
+      }
+    } catch {
+      toast("Erreur Snapcast");
+    }
+  }
+
+  async function fetchServicesStatus(){
+    if(AppConfig.transport !== "rest") return [];
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/services/status`);
+      const body = await res.json();
+      if(body?.ok && Array.isArray(body.data)) return body.data;
+    } catch {}
+    return [];
+  }
+
+  async function fetchLibraryRoots(){
+    if(AppConfig.transport !== "rest") return null;
+    try {
+      const subdir = (libsSubdirInput.value || "").trim();
+      const url = new URL(`${AppConfig.restBaseUrl}/library/roots`, window.location.origin);
+      if(subdir) url.searchParams.set("subdir", subdir);
+      const res = await fetch(url.toString());
+      const body = await res.json();
+      if(body?.ok) return body.data;
+    } catch {}
+    return null;
+  }
+
+  async function syncLibraryRoots(dry=true){
+    if(AppConfig.transport !== "rest") return null;
+    try {
+      const subdir = (libsSubdirInput.value || "").trim();
+      const res = await fetch(`${AppConfig.restBaseUrl}/library/roots/sync`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({dry, subdir})
+      });
+      const body = await res.json();
+      if(body?.ok) return body;
+      toast(body?.error || "Erreur sync libs");
+    } catch {
+      toast("Erreur sync libs");
+    }
+    return null;
+  }
+
+  function renderLibraryRoots(){
+    libsList.innerHTML = "";
+    if(!libsData){
+      libsInfo.textContent = "Aucune donnée chargée.";
+      libsStats.textContent = "";
+      return;
+    }
+    const detected = libsData.detected || [];
+    libsInfo.textContent = `Racines détectées: ${detected.length} • Liens: ${libsData.link_root}`;
+    libsStats.textContent = libsData?.actions
+      ? `Actions: +${libsData.actions.created || 0} ~${libsData.actions.updated || 0} -${libsData.actions.removed || 0} =${libsData.actions.kept || 0}`
+      : "";
+    if(!detected.length){
+      libsList.innerHTML = '<div class="muted">Aucune bibliothèque détectée.</div>';
+      return;
+    }
+    detected.forEach((r)=>{
+      const subtitle = r.linked ? `lié → ${r.link}` : "non lié";
+      libsList.append(listRow({
+        title: r.name,
+        subtitle,
+        left: coverEl("sm", r.name),
+        right: r.linked ? button("OK", {disabled:true}) : button("Lier", {onClick: async (ev)=>{
+          ev.stopPropagation();
+          const res = await syncLibraryRoots(false);
+          if(res?.ok){
+            libsData = await fetchLibraryRoots();
+            renderLibraryRoots();
+          }
+        }})
+      }));
+    });
+  }
+
+  function renderLibsResult(data){
+    if(!data?.detail){
+      libsResult.hidden = true;
+      return;
+    }
+    libsResult.hidden = false;
+    libsData = { ...(libsData || {}), actions: data.actions || null };
+    renderLibraryRoots();
+    const sections = [
+      ["created", "CREATED"],
+      ["updated", "UPDATED"],
+      ["removed", "REMOVED"],
+      ["kept", "KEPT"],
+    ];
+    const lines = [];
+    sections.forEach(([key, label])=>{
+      const items = data.detail?.[key] || [];
+      if(!items.length) return;
+      lines.push(`[${label}]`);
+      items.forEach((r)=>{
+        const link = r.link || "";
+        const path = r.path || "";
+        lines.push(`${link} -> ${path}`);
+      });
+      lines.push("");
+    });
+    libsResultPre.textContent = lines.join("\n").trim();
+  }
+
+  async function serviceAction(name, action){
+    if(AppConfig.transport !== "rest") return null;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/services/action`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({name, action})
+      });
+      const body = await res.json();
+      if(body?.ok) return body.data;
+      toast(body?.error || "Erreur service");
+    } catch {
+      toast("Erreur service");
+    }
+    return null;
+  }
+
+  function renderSources(){
+    sourcesList.innerHTML = "";
+    if(!servicesStatus.length){
+      sourcesList.innerHTML = '<div class="muted">Aucune source détectée.</div>';
+      return;
+    }
+    servicesStatus.forEach((s)=>{
+      const label = s.name?.replace(".service", "") || "Service";
+      const subtitle = s.installed
+        ? (s.active ? "en cours" : "arrêté")
+        : "non installé";
+      const actionBtn = s.installed
+        ? button(s.active ? "Stop" : "Start", {onClick: async (ev)=>{
+            ev.stopPropagation();
+            const res = await serviceAction(s.name, s.active ? "stop" : "start");
+            if(res) {
+              servicesStatus = await fetchServicesStatus();
+              renderSources();
+            }
+          }})
+        : button("Installer", {onClick: (ev)=>{ev.stopPropagation(); toast("Installe via apt (shairport-sync/librespot)");}});
+      sourcesList.append(listRow({
+        title: label,
+        subtitle,
+        left: coverEl("sm", label),
+        right: actionBtn
+      }));
+    });
   }
 
   async function startScan(){
@@ -364,6 +686,16 @@ export async function render(root){
     return [];
   }
 
+  async function fetchCmdLogs(){
+    if(AppConfig.transport !== "rest") return [];
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/cmd/logs?limit=300`);
+      const body = await res.json();
+      if(body?.ok && Array.isArray(body.data)) return body.data;
+    } catch {}
+    return [];
+  }
+
   async function refreshDocsStatus(){
     const status = await fetchDocsStatus();
     if(!status) return;
@@ -423,4 +755,10 @@ export async function render(root){
   await refreshDocsStatus();
   await refreshLatency();
   await refreshSnapcastStatus();
+  cmdLogs = await fetchCmdLogs();
+  renderLogs(cmdLogBox, cmdLogPre, cmdLogs, false);
+  servicesStatus = await fetchServicesStatus();
+  renderSources();
+  libsData = await fetchLibraryRoots();
+  renderLibraryRoots();
 }

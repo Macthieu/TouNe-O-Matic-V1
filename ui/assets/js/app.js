@@ -3,7 +3,7 @@ import { $, $$, formatTime, toast, onOutsideClick, clamp } from "./utils.js";
 import { registerRoute, renderRoute, navigate } from "./router.js";
 import { buildMockLibrary } from "./services/mockdata.js";
 import { MPDClient } from "./services/mpd.js";
-import { fetchQueueStatus } from "./services/library.js";
+import { fetchQueueStatus, fetchCmdStatus } from "./services/library.js";
 import { AppConfig } from "./config.js";
 
 // Pages
@@ -301,6 +301,7 @@ renderPlayerBar(store.get().player);
 renderQueuePane(store.get().player);
 renderHeader(store.get().player);
 initQueueBadge();
+initCmdToast();
 
 function applyTheme(theme){
   document.documentElement.dataset.theme = theme;
@@ -428,6 +429,35 @@ async function initQueueBadge(){
   }
   await refresh();
   setInterval(refresh, 5000);
+}
+
+async function initCmdToast(){
+  const toastEl = $("#cmdToast");
+  if(!toastEl) return;
+  let lastTs = 0;
+  async function refresh(){
+    const st = await fetchCmdStatus();
+    if(!toastEl.isConnected) return;
+    if(!st){
+      toastEl.hidden = true;
+      return;
+    }
+    const ts = Number(st.last_cmd_ts || 0);
+    if(!st.last_error){
+      toastEl.hidden = true;
+      lastTs = ts || lastTs;
+      return;
+    }
+    if(ts && ts === lastTs){
+      return;
+    }
+    lastTs = ts || lastTs;
+    const cmd = st.last_cmd_line || st.last_cmd || "cmd";
+    toastEl.textContent = `Erreur cmd: ${cmd} — ${st.last_error}`;
+    toastEl.hidden = false;
+  }
+  await refresh();
+  setInterval(refresh, 3000);
 }
 
 // Desktop queue clear

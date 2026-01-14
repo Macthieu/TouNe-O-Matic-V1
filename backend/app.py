@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Iterable
 import re
 import unicodedata
+import subprocess
 
 from flask import Flask, jsonify, request, send_file, make_response
 from PIL import Image
@@ -26,6 +27,8 @@ MPD_HOST = os.environ.get("MPD_HOST", "127.0.0.1")
 MPD_PORT = int(os.environ.get("MPD_PORT", "6600"))
 PLAYLISTS_DIR = Path(os.environ.get("TOUNE_PLAYLISTS_DIR", "/mnt/libraries/playlists"))
 MUSIC_ROOT = Path(os.environ.get("TOUNE_MUSIC_ROOT", "/mnt/libraries/music"))
+MEDIA_ROOT = Path(os.environ.get("TOUNE_MEDIA_ROOT", "/mnt/media"))
+LIB_LINK_ROOT = Path(os.environ.get("TOUNE_LIBRARY_LINK_ROOT", str(MUSIC_ROOT)))
 DOCS_ROOT = Path(os.environ.get("TOUNE_DOCS_ROOT", "/mnt/libraries/docs"))
 DB_PATH = Path(os.environ.get("TOUNE_DB_PATH", "/srv/toune/data/toune.db"))
 CACHE_DIR = Path(os.environ.get("TOUNE_CACHE_DIR", "/srv/toune/data/cache"))
@@ -894,6 +897,35 @@ def _snapcast_status() -> Dict[str, Any]:
     return {"groups": groups, "clients": list(all_clients.values()), "streams": streams}
 
 
+def _service_status(name: str) -> Dict[str, Any]:
+    status = {"name": name, "installed": False, "active": False, "enabled": False}
+    try:
+        res = subprocess.run(["systemctl", "is-active", name], capture_output=True, text=True, timeout=2)
+        out = (res.stdout or "").strip()
+        if out == "unknown":
+            return status
+        status["installed"] = True
+        status["active"] = out == "active"
+    except Exception:
+        return status
+    try:
+        res = subprocess.run(["systemctl", "is-enabled", name], capture_output=True, text=True, timeout=2)
+        status["enabled"] = (res.stdout or "").strip() == "enabled"
+    except Exception:
+        pass
+    return status
+
+
+def _service_action(name: str, action: str) -> Dict[str, Any]:
+    if action not in ("start", "stop", "restart"):
+        raise ValueError("invalid action")
+    status = _service_status(name)
+    if not status.get("installed"):
+        raise FileNotFoundError("service not installed")
+    subprocess.run(["systemctl", action, name], check=True)
+    return _service_status(name)
+
+
 def _snapcast_load_state() -> Dict[str, Any]:
     try:
         if SNAPCAST_STATE_FILE.exists():
@@ -901,6 +933,115 @@ def _snapcast_load_state() -> Dict[str, Any]:
     except Exception:
         pass
     return {}
+
+
+def _read_cmd_logs(limit: int = 200) -> List[Dict[str, Any]]:
+    p = STATE_DIR / "cmd.log"
+    if not p.exists():
+        return []
+    try:
+        lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+        tail = lines[-limit:] if limit else lines
+        out = []
+        for ln in tail:
+            try:
+                out.append(json.loads(ln))
+            except Exception:
+                out.append({"raw": ln})
+        return out
+    except Exception:
+        return []
+
+
+def _library_roots_state_path() -> Path:
+    return STATE_DIR / "library_roots.json"
+
+
+def _detect_library_roots(subdir: Optional[str] = None) -> List[Dict[str, str]]:
+    roots: List[Dict[str, str]] = []
+    if not MEDIA_ROOT.exists():
+        return roots
+    for mount in sorted([p for p in MEDIA_ROOT.iterdir() if p.is_dir()]):
+        candidates = []
+        if subdir:
+            candidates.append(mount / subdir)
+        candidates += [
+            mount / "Musique",
+            mount / "music",
+            mount / "Music",
+        ]
+        picked = next((c for c in candidates if c.exists() and c.is_dir()), None)
+        if picked:
+            roots.append({"name": mount.name, "path": str(picked)})
+    return roots
+
+
+def _load_library_roots_state() -> Dict[str, Any]:
+    p = _library_roots_state_path()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return {}
+
+
+def _save_library_roots_state(data: Dict[str, Any]) -> None:
+    _atomic_write_file(_library_roots_state_path(), json.dumps(data, ensure_ascii=False))
+
+
+def _sync_library_links(dry: bool = False, subdir: Optional[str] = None) -> Dict[str, Any]:
+    detected = _detect_library_roots(subdir=subdir)
+    state = _load_library_roots_state()
+    prev_links = {item["link"]: item for item in state.get("links", []) if isinstance(item, dict) and item.get("link")}
+    actions = {"created": 0, "updated": 0, "removed": 0, "kept": 0}
+    detail = {"created": [], "updated": [], "removed": [], "kept": []}
+    links: List[Dict[str, str]] = []
+
+    LIB_LINK_ROOT.mkdir(parents=True, exist_ok=True)
+
+    for root in detected:
+        name = root["name"]
+        path = root["path"]
+        link = str(LIB_LINK_ROOT / name)
+        links.append({"name": name, "path": path, "link": link})
+        if os.path.islink(link) or Path(link).exists():
+            if os.path.islink(link) and os.readlink(link) == path:
+                actions["kept"] += 1
+                detail["kept"].append({"link": link, "path": path})
+                continue
+            actions["updated"] += 1
+            detail["updated"].append({"link": link, "path": path})
+            if not dry:
+                try:
+                    Path(link).unlink()
+                except Exception:
+                    pass
+        else:
+            actions["created"] += 1
+            detail["created"].append({"link": link, "path": path})
+        if not dry:
+            try:
+                Path(link).symlink_to(path)
+            except Exception:
+                pass
+
+    for link, item in prev_links.items():
+        if any(l["link"] == link for l in links):
+            continue
+        if os.path.islink(link):
+            actions["removed"] += 1
+            detail["removed"].append({"link": link, "path": item.get("path") or ""})
+            if not dry:
+                try:
+                    Path(link).unlink()
+                except Exception:
+                    pass
+
+    if not dry:
+        _save_library_roots_state({"links": links})
+
+    return {"roots": links, "actions": actions, "detail": detail, "subdir": subdir or ""}
 
 
 def _snapcast_save_state(data: Dict[str, Any]) -> None:
@@ -1302,7 +1443,14 @@ def mpd_queue():
 
 @app.get("/api/state")
 def state_read():
-    return ok(_read_state_file())
+    with_queue = (request.args.get("with_queue") or "").strip().lower() in ("1", "true", "yes")
+    with_status = (request.args.get("with_status") or "").strip().lower() in ("1", "true", "yes")
+    payload: Dict[str, Any] = {"state": _read_state_file()}
+    if with_queue:
+        payload["queue"] = _read_queue_file()
+    if with_status:
+        payload["queue_status"] = _queue_sync_status()
+    return ok(payload)
 
 
 @app.post("/api/cmd")
@@ -1364,6 +1512,98 @@ def queue_sync():
 @app.get("/api/queue/status")
 def queue_status():
     return ok(_queue_sync_status())
+
+
+@app.post("/api/queue/persist")
+def queue_persist():
+    try:
+        with mpd_client() as c:
+            stats = _sync_queue_from_mpd(c)
+            pl = c.playlistinfo()
+        return ok({"count": len(pl), **stats})
+    except Exception as e:
+        return err("queue persist failed", 500, detail=str(e))
+
+
+@app.get("/api/cmd/status")
+def cmd_status():
+    state = _read_state_file()
+    payload = {
+        "last_cmd": state.get("last_cmd", ""),
+        "last_cmd_line": state.get("last_cmd_line", ""),
+        "last_cmd_ts": state.get("last_cmd_ts", 0),
+        "last_error": state.get("last_error", ""),
+    }
+    return ok(payload)
+
+
+@app.get("/api/cmd/logs")
+def cmd_logs():
+    try:
+        limit = int(request.args.get("limit", "200"))
+    except Exception:
+        limit = 200
+    limit = max(1, min(limit, 1000))
+    return ok(_read_cmd_logs(limit))
+
+
+@app.get("/api/services/status")
+def services_status():
+    names = request.args.get("names") or ""
+    if names:
+        wanted = [n.strip() for n in names.split(",") if n.strip()]
+    else:
+        wanted = ["shairport-sync.service", "librespot.service", "snapclient.service"]
+    data = [_service_status(n) for n in wanted]
+    return ok(data)
+
+
+@app.post("/api/services/action")
+def services_action():
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    action = (data.get("action") or "").strip().lower()
+    if not name or not action:
+        return err("missing name/action")
+    try:
+        status = _service_action(name, action)
+        return ok(status)
+    except FileNotFoundError:
+        return err("service not installed", 404)
+    except ValueError:
+        return err("invalid action", 400)
+    except Exception as e:
+        return err("service action failed", 500, detail=str(e))
+
+
+@app.get("/api/library/roots")
+def library_roots():
+    subdir = (request.args.get("subdir") or "").strip() or None
+    detected = _detect_library_roots(subdir=subdir)
+    state = _load_library_roots_state()
+    links = {item["name"]: item for item in state.get("links", []) if isinstance(item, dict)}
+    out = []
+    for root in detected:
+        name = root["name"]
+        entry = {"name": name, "path": root["path"], "linked": False, "link": ""}
+        if name in links:
+            entry["linked"] = True
+            entry["link"] = links[name].get("link") or ""
+        out.append(entry)
+    return ok({"detected": out, "link_root": str(LIB_LINK_ROOT), "subdir": subdir or ""})
+
+
+@app.post("/api/library/roots/sync")
+def library_roots_sync():
+    data = request.get_json(silent=True) or {}
+    dry = bool(data.get("dry"))
+    subdir = (data.get("subdir") or "").strip() or None
+    try:
+        result = _sync_library_links(dry=dry, subdir=subdir)
+        result["dry"] = dry
+        return ok(result)
+    except Exception as e:
+        return err("roots sync failed", 500, detail=str(e))
 
 
 @app.get("/api/radio/tags")
@@ -1538,6 +1778,20 @@ def snapcast_status():
         return ok(data)
     except Exception as e:
         return err("snapcast status failed", 500, detail=str(e))
+
+
+@app.post("/api/snapcast/stream")
+def snapcast_stream_set():
+    data = request.get_json(silent=True) or {}
+    group_id = (data.get("group_id") or "").strip()
+    stream_id = (data.get("stream_id") or "").strip()
+    if not group_id or not stream_id:
+        return err("missing group_id/stream_id")
+    try:
+        _snapcast_rpc("Group.SetStream", {"id": group_id, "stream_id": stream_id})
+        return ok({"group_id": group_id, "stream_id": stream_id})
+    except Exception as e:
+        return err("snapcast set stream failed", 500, detail=str(e))
 
 
 @app.post("/api/library/queue/random-next")

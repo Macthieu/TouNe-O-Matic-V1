@@ -14,6 +14,9 @@ MPD_PORT = int(os.environ.get("MPD_PORT", "6600"))
 STATE_DIR = Path(os.environ.get("TOUNE_STATE_DIR", "/srv/toune/state"))
 CMD_PATH = STATE_DIR / "cmd.txt"
 STATE_PATH = STATE_DIR / "state.json"
+QUEUE_PATH = STATE_DIR / "queue.json"
+CMD_LOG_PATH = STATE_DIR / "cmd.log"
+QUEUE_RESTORE = os.environ.get("TOUNE_QUEUE_RESTORE", "1") not in ("0", "false", "False")
 
 
 def _atomic_write(path: Path, payload: str):
@@ -21,6 +24,21 @@ def _atomic_write(path: Path, payload: str):
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(payload, encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _append_cmd_log(entry: Dict[str, Any], max_lines: int = 500):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(entry, ensure_ascii=False)
+    with CMD_LOG_PATH.open("a", encoding="utf-8") as f:
+        f.write(line + "\n")
+    try:
+        if CMD_LOG_PATH.stat().st_size > 200_000:
+            lines = CMD_LOG_PATH.read_text(encoding="utf-8", errors="ignore").splitlines()
+            if len(lines) > max_lines:
+                tail = lines[-max_lines:]
+                CMD_LOG_PATH.write_text("\n".join(tail) + "\n", encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _read_cmds() -> List[str]:
@@ -101,7 +119,7 @@ def _handle_cmd(client: MPDClient, line: str) -> Optional[str]:
     return f"ignored:{line}"
 
 
-def _collect_state(client: MPDClient, last_cmd: str, last_error: str) -> Dict[str, Any]:
+def _collect_state(client: MPDClient, last_cmd: str, last_cmd_line: str, last_cmd_ts: int, last_error: str) -> Dict[str, Any]:
     try:
         status = client.status()
     except Exception:
@@ -115,12 +133,37 @@ def _collect_state(client: MPDClient, last_cmd: str, last_error: str) -> Dict[st
         "status": status,
         "song": song,
         "last_cmd": last_cmd,
+        "last_cmd_line": last_cmd_line,
+        "last_cmd_ts": last_cmd_ts,
         "last_error": last_error,
     }
 
 
+def _restore_queue_if_empty(client: MPDClient) -> bool:
+    if not QUEUE_RESTORE:
+        return False
+    if not QUEUE_PATH.exists():
+        return False
+    try:
+        existing = client.playlistinfo()
+        if existing:
+            return False
+        data = json.loads(QUEUE_PATH.read_text(encoding="utf-8", errors="ignore"))
+        if not isinstance(data, list) or not data:
+            return False
+        client.clear()
+        for p in data:
+            if p:
+                client.add(p)
+        return True
+    except Exception:
+        return False
+
+
 def run_loop(poll_s: float = 0.5):
     last_cmd = ""
+    last_cmd_line = ""
+    last_cmd_ts = 0
     last_error = ""
     while True:
         try:
@@ -128,15 +171,30 @@ def run_loop(poll_s: float = 0.5):
             client.timeout = 10
             client.idletimeout = None
             client.connect(MPD_HOST, MPD_PORT)
+            _restore_queue_if_empty(client)
             while True:
                 cmds = _read_cmds()
                 for line in cmds:
                     try:
                         last_cmd = _handle_cmd(client, line) or last_cmd
+                        last_cmd_line = line
+                        last_cmd_ts = int(time.time())
                         last_error = ""
+                        _append_cmd_log({
+                            "ts": last_cmd_ts,
+                            "line": line,
+                            "result": "ok",
+                            "cmd": last_cmd,
+                        })
                     except Exception as e:
                         last_error = str(e)
-                state = _collect_state(client, last_cmd, last_error)
+                        _append_cmd_log({
+                            "ts": int(time.time()),
+                            "line": line,
+                            "result": "error",
+                            "error": last_error,
+                        })
+                state = _collect_state(client, last_cmd, last_cmd_line, last_cmd_ts, last_error)
                 _atomic_write(STATE_PATH, json.dumps(state, ensure_ascii=False))
                 time.sleep(poll_s)
         except Exception as e:
@@ -146,6 +204,8 @@ def run_loop(poll_s: float = 0.5):
                 "status": {},
                 "song": {},
                 "last_cmd": last_cmd,
+                "last_cmd_line": last_cmd_line,
+                "last_cmd_ts": last_cmd_ts,
                 "last_error": last_error,
             }
             _atomic_write(STATE_PATH, json.dumps(state, ensure_ascii=False))

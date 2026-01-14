@@ -130,12 +130,26 @@ export async function syncQueue(){
 export async function fetchQueueStatus(){
   if(AppConfig.transport !== "rest") return null;
   try {
-    const res = await fetch(`${AppConfig.restBaseUrl}/queue/status`);
+    const res = await fetch(`${AppConfig.restBaseUrl}/state?with_status=1`);
     const body = await res.json().catch(()=>null);
     if(!res.ok || body?.ok === false){
       throw new Error(body?.error || `HTTP ${res.status}`);
     }
-    return body.data;
+    return body.data?.queue_status || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchCmdStatus(){
+  if(AppConfig.transport !== "rest") return null;
+  try {
+    const res = await fetch(`${AppConfig.restBaseUrl}/cmd/status`);
+    const body = await res.json().catch(()=>null);
+    if(!res.ok || body?.ok === false){
+      throw new Error(body?.error || `HTTP ${res.status}`);
+    }
+    return body.data || null;
   } catch {
     return null;
   }
