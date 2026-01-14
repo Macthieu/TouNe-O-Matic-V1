@@ -132,6 +132,15 @@ export async function deletePlaylist(name){
   }
 }
 
+export async function importPlaylist(name, content){
+  try {
+    await postJson("/playlists/import", {name, content});
+    await refreshPlaylists();
+  } catch {
+    toast("Erreur: import playlist");
+  }
+}
+
 export async function fetchFavourites(){
   if(AppConfig.transport !== "rest") return [];
   try {

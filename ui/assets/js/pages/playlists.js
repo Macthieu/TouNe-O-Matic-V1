@@ -3,7 +3,7 @@ import { AppConfig } from "../config.js";
 import { store } from "../store.js";
 import { formatTime, toast } from "../utils.js";
 import { navigate } from "../router.js";
-import { playPaths, showAddMenu, playPlaylist, queuePlaylist, removeFromPlaylist, moveInPlaylist, renamePlaylist, deletePlaylist, createPlaylist } from "../services/library.js";
+import { playPaths, showAddMenu, playPlaylist, queuePlaylist, removeFromPlaylist, moveInPlaylist, renamePlaylist, deletePlaylist, createPlaylist, importPlaylist } from "../services/library.js";
 
 const playlistCoverCache = new Map();
 const playlistCoverInFlight = new Map();
@@ -25,6 +25,7 @@ export async function render(root, params){
     if(!name) return;
     await createPlaylist(name);
   }}));
+  actions.append(button("Importer (.m3u)", {onClick: ()=>openImportDialog()}));
   actions.append(button("Rafraîchir pochettes", {onClick: ()=>{
     playlistCoverCache.clear();
     playlistCoverInFlight.clear();
@@ -122,9 +123,17 @@ async function renderPlaylistDetail(root, name){
     list.innerHTML = '<div class="muted">Playlist vide ou introuvable.</div>';
   } else {
     items.forEach((t, idx)=>{
+      const isMissing = t.available === false;
+      const title = t.title || t.raw || "—";
+      const subtitleBits = [t.artist || "—", t.album || "—"];
+      if(isMissing){
+        subtitleBits.push(`indisponible: ${t.reason || "fichier manquant"}`);
+      }
       const actions = document.createElement("div");
       actions.className = "row__actions";
-      actions.append(actionBtn("▶", "Lire", (ev)=>{ev.stopPropagation(); playPaths([t.path].filter(Boolean));}));
+      const playBtn = actionBtn("▶", "Lire", (ev)=>{ev.stopPropagation(); playPaths([t.path].filter(Boolean));});
+      if(isMissing) playBtn.disabled = true;
+      actions.append(playBtn);
       const cover = coverEl("sm", t.title || "");
       if(t.artist && t.album){
         const url = new URL(`${AppConfig.restBaseUrl}/docs/album/art`, window.location.origin);
@@ -136,14 +145,18 @@ async function renderPlaylistDetail(root, name){
         cover.style.backgroundPosition = "center";
       }
       const row = listRow({
-        title: t.title || "—",
-        subtitle: `${t.artist || "—"} • ${t.album || "—"}`,
+        title,
+        subtitle: subtitleBits.join(" • "),
         left: cover,
         right: actions,
         draggable: true,
         data: {i: idx}
       });
+      if(isMissing){
+        row.classList.add("row--missing");
+      }
       const addBtn = actionBtn("+", "Ajouter", (ev)=>{ev.stopPropagation(); showAddMenu(ev.currentTarget, {title: t.title, paths:[t.path].filter(Boolean)});});
+      if(isMissing) addBtn.disabled = true;
       const delBtn = actionBtn("🗑", "Supprimer", async (ev)=>{
         ev.stopPropagation();
         await removeFromPlaylist(name, t.path);
@@ -189,6 +202,28 @@ function actionBtn(label, title, onClick){
   btn.textContent = label;
   btn.addEventListener("click", onClick);
   return btn;
+}
+
+async function openImportDialog(){
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = ".m3u,.m3u8,.txt";
+  input.addEventListener("change", async ()=>{
+    const file = input.files?.[0];
+    if(!file) return;
+    const suggested = file.name.endsWith(".m3u") ? file.name : `${file.name}.m3u`;
+    const name = window.prompt("Nom de la playlist importée", suggested);
+    if(!name) return;
+    try {
+      const content = await file.text();
+      await importPlaylist(name, content);
+      toast("Playlist importée");
+      navigate("playlists", new URLSearchParams({name}));
+    } catch {
+      toast("Erreur: import playlist");
+    }
+  });
+  input.click();
 }
 
 async function fetchPlaylistInfo(name){

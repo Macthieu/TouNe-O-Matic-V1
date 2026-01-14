@@ -37,6 +37,11 @@ PHOTO_SOURCES_FILE = DOCS_ROOT / "Photos d'artiste" / "_sources.json"
 SNAPCAST_RPC_URL = os.environ.get("SNAPCAST_RPC_URL", "http://127.0.0.1:1780/jsonrpc")
 SNAPCAST_STATE_FILE = Path(os.environ.get("SNAPCAST_STATE_FILE", "/srv/toune/data/snapcast.json"))
 RADIO_BROWSER_URL = os.environ.get("RADIO_BROWSER_URL", "https://de1.api.radio-browser.info")
+PLAYLIST_PREFIXES = [
+    "/mnt/libraries/music/",
+    "/mnt/media/wd/Musique/",
+    "/mnt/librairies/music/",  # typo seen in imported playlists
+]
 
 SCAN_STATE = {
     "running": False,
@@ -272,6 +277,57 @@ def _radio_station_payload(item: Dict[str, Any]) -> Dict[str, Any]:
         "codec": item.get("codec") or "",
         "bitrate": item.get("bitrate") or 0,
         "homepage": item.get("homepage") or "",
+    }
+
+
+def _normalize_playlist_path(raw: str) -> Tuple[Optional[str], str]:
+    if not raw:
+        return None, "empty"
+    raw = raw.strip()
+    if raw.startswith("file://"):
+        raw = raw[7:]
+    raw = raw.replace("\\", "/")
+    if raw.startswith("/mnt/librairies/music/"):
+        raw = raw.replace("/mnt/librairies/music/", "/mnt/libraries/music/", 1)
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return raw, "url"
+    if raw.startswith("/"):
+        for pref in PLAYLIST_PREFIXES:
+            if raw.startswith(pref):
+                return raw[len(pref):], "absolute"
+        return None, "outside"
+    return raw, "relative"
+
+
+def _playlist_entry_info(raw_path: str) -> Dict[str, Any]:
+    mapped, reason = _normalize_playlist_path(raw_path)
+    if not mapped:
+        return {
+            "path": raw_path,
+            "raw": raw_path,
+            "available": False,
+            "reason": "chemin hors bibliothèque",
+        }
+    if mapped.startswith("http://") or mapped.startswith("https://"):
+        return {
+            "path": mapped,
+            "raw": raw_path,
+            "available": True,
+            "reason": None,
+        }
+    abs_path = MUSIC_ROOT / mapped
+    if not abs_path.exists():
+        return {
+            "path": mapped,
+            "raw": raw_path,
+            "available": False,
+            "reason": "fichier manquant",
+        }
+    return {
+        "path": mapped,
+        "raw": raw_path,
+        "available": True,
+        "reason": None,
     }
 
 
@@ -1168,6 +1224,44 @@ def playlists_delete():
     return ok({"deleted": p.name})
 
 
+@app.post("/api/playlists/import")
+def playlists_import():
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    content = data.get("content") or ""
+    if not name:
+        return err("missing playlist name")
+    if not content.strip():
+        return err("missing content")
+    PLAYLISTS_DIR.mkdir(parents=True, exist_ok=True)
+    p = _playlist_path(name)
+    lines = content.splitlines()
+    out: List[str] = []
+    if not lines or not lines[0].strip().startswith("#EXTM3U"):
+        out.append("#EXTM3U")
+    added = 0
+    kept = 0
+    skipped = 0
+    for ln in lines:
+        ln = ln.rstrip("\n")
+        if not ln:
+            continue
+        if ln.startswith("#"):
+            out.append(ln)
+            continue
+        mapped, reason = _normalize_playlist_path(ln)
+        if not mapped:
+            out.append(ln)
+            skipped += 1
+            continue
+        out.append(mapped)
+        if reason in ("absolute", "relative", "url"):
+            added += 1
+        kept += 1
+    p.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+    return ok({"name": p.name, "tracks_in_file": kept, "normalized": added, "skipped": skipped})
+
+
 @app.post("/api/playlists/rename")
 def playlists_rename():
     data = request.get_json(silent=True) or {}
@@ -1273,33 +1367,20 @@ def playlists_load():
     try:
         lines = [ln.strip() for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
         tracks = [ln for ln in lines if ln and not ln.startswith("#")]
-
-        # Convertit chemins absolus vers chemins MPD relatifs
-        # Ex: /mnt/media/wd/Musique/Artist/Album/1 - Track.flac  -> Artist/Album/1 - Track.flac
-        # MPD voit /mnt/libraries/music -> /mnt/media/wd/Musique (symlink)
-        prefix_candidates = [
-            "/mnt/libraries/music/",
-            "/mnt/media/wd/Musique/",
-        ]
-
-        def to_mpd_path(x: str) -> Optional[str]:
-            for pref in prefix_candidates:
-                if x.startswith(pref):
-                    return x[len(pref):]
-            # si c'est déjà relatif, on accepte tel quel
-            if not x.startswith("/"):
-                return x
-            return None  # on ignore ce qu'on ne peut pas mapper
-
-        mapped = [to_mpd_path(t) for t in tracks]
-        mapped = [m for m in mapped if m]
+        entries = [_playlist_entry_info(t) for t in tracks]
+        mapped = [e["path"] for e in entries if e.get("available")]
 
         with mpd_client() as c:
             c.clear()
             for m in mapped:
                 c.add(m)
             c.play()
-        return ok({"loaded": name, "tracks_added": len(mapped), "tracks_in_file": len(tracks)})
+        return ok({
+            "loaded": name,
+            "tracks_added": len(mapped),
+            "tracks_in_file": len(tracks),
+            "missing": len([e for e in entries if not e.get("available")]),
+        })
     except Exception as e:
         return err("load playlist failed", 500, detail=str(e))
 
@@ -1315,27 +1396,18 @@ def playlists_queue():
     try:
         lines = [ln.strip() for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
         tracks = [ln for ln in lines if ln and not ln.startswith("#")]
-
-        prefix_candidates = [
-            "/mnt/libraries/music/",
-            "/mnt/media/wd/Musique/",
-        ]
-
-        def to_mpd_path(x: str) -> Optional[str]:
-            for pref in prefix_candidates:
-                if x.startswith(pref):
-                    return x[len(pref):]
-            if not x.startswith("/"):
-                return x
-            return None
-
-        mapped = [to_mpd_path(t) for t in tracks]
-        mapped = [m for m in mapped if m]
+        entries = [_playlist_entry_info(t) for t in tracks]
+        mapped = [e["path"] for e in entries if e.get("available")]
 
         with mpd_client() as c:
             for m in mapped:
                 c.add(m)
-        return ok({"queued": name, "tracks_added": len(mapped), "tracks_in_file": len(tracks)})
+        return ok({
+            "queued": name,
+            "tracks_added": len(mapped),
+            "tracks_in_file": len(tracks),
+            "missing": len([e for e in entries if not e.get("available")]),
+        })
     except Exception as e:
         return err("queue playlist failed", 500, detail=str(e))
 
@@ -1351,37 +1423,28 @@ def playlists_info():
     try:
         lines = [ln.strip() for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
         tracks = [ln for ln in lines if ln and not ln.startswith("#")]
+        entries = [_playlist_entry_info(t) for t in tracks]
+        mapped = [e["path"] for e in entries if e.get("path") and not str(e.get("path")).startswith("http")]
 
-        prefix_candidates = [
-            "/mnt/libraries/music/",
-            "/mnt/media/wd/Musique/",
-        ]
+        meta = {}
+        if mapped:
+            with _db_connect() as conn:
+                placeholders = ",".join(["?"] * len(mapped))
+                rows = conn.execute(
+                    f"SELECT path, title, artist, album, duration, track_no, year FROM track WHERE path IN ({placeholders})",
+                    mapped,
+                ).fetchall()
+            meta = {r["path"]: dict(r) for r in rows}
 
-        def to_mpd_path(x: str) -> Optional[str]:
-            for pref in prefix_candidates:
-                if x.startswith(pref):
-                    return x[len(pref):]
-            if not x.startswith("/"):
-                return x
-            return None
-
-        mapped = [to_mpd_path(t) for t in tracks]
-        mapped = [m for m in mapped if m]
-        if not mapped:
-            return ok({"name": name, "tracks": []})
-
-        with _db_connect() as conn:
-            placeholders = ",".join(["?"] * len(mapped))
-            rows = conn.execute(
-                f"SELECT path, title, artist, album, duration, track_no, year FROM track WHERE path IN ({placeholders})",
-                mapped,
-            ).fetchall()
-        meta = {r["path"]: dict(r) for r in rows}
         ordered = []
-        for path in mapped:
+        for entry in entries:
+            path = entry.get("path") or ""
             m = meta.get(path) or {"path": path}
             if not m.get("title"):
-                m["title"] = Path(path).name
+                m["title"] = Path(path or entry.get("raw") or "—").name
+            m["available"] = entry.get("available", False)
+            m["reason"] = entry.get("reason")
+            m["raw"] = entry.get("raw")
             ordered.append(m)
         return ok({"name": name, "tracks": ordered})
     except Exception as e:

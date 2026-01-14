@@ -327,6 +327,14 @@ svg{ fill: currentColor; }
   text-align:left;
 }
 .row:hover{ background: rgba(255,255,255,.06); border-color: var(--border); }
+.row--missing{
+  opacity: .6;
+  cursor: default;
+}
+.row--missing:hover{
+  background: transparent;
+  border-color: transparent;
+}
 .row__icon{
   width: 32px; height: 32px;
   display:grid; place-items:center;
@@ -948,5 +956,10 @@ input[type="range"]{ accent-color: var(--accent); }
   font: inherit;
 }
 .icon-btn:hover{ background: rgba(255,255,255,.07); }
+.icon-btn[disabled]{
+  opacity: .45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
 
 .h1{ font-size: 22px; font-weight: 800; letter-spacing:.2px; }
