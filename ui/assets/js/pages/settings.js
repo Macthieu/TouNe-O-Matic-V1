@@ -182,7 +182,11 @@ export async function render(root){
     if(!nextStream || !groupId) return;
     await applyStream(groupId, nextStream);
   }});
-  streamRow.append(streamSelect, streamApply);
+  const streamSetup = button("Configurer sources", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    await enableSnapcastSources();
+  }});
+  streamRow.append(streamSelect, streamApply, streamSetup);
   const multiRow = document.createElement("div");
   multiRow.style.display = "grid";
   multiRow.style.gridTemplateColumns = "1fr auto";
@@ -467,6 +471,22 @@ export async function render(root){
     }
   }
 
+  async function enableSnapcastSources(){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/snapcast/sources/enable`, {method: "POST"});
+      const body = await res.json();
+      if(body?.ok){
+        toast(`Sources configurées (${body.data?.result || "ok"})`);
+        await refreshSnapcastStatus();
+      } else {
+        toast(body?.error || "Erreur configuration sources");
+      }
+    } catch {
+      toast("Erreur configuration sources");
+    }
+  }
+
   async function fetchServicesStatus(){
     if(AppConfig.transport !== "rest") return [];
     try {
@@ -557,18 +577,28 @@ export async function render(root){
       ["kept", "KEPT"],
     ];
     const lines = [];
+    const clsMap = {
+      created: "log-created",
+      updated: "log-updated",
+      removed: "log-removed",
+      kept: "log-kept",
+    };
+    const esc = (s)=>String(s || "")
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;");
     sections.forEach(([key, label])=>{
       const items = data.detail?.[key] || [];
       if(!items.length) return;
-      lines.push(`[${label}]`);
+      lines.push(`<span class="log-tag ${clsMap[key] || ""}">[${label}]</span>`);
       items.forEach((r)=>{
         const link = r.link || "";
         const path = r.path || "";
-        lines.push(`${link} -> ${path}`);
+        lines.push(`${esc(link)} -> ${esc(path)}`);
       });
       lines.push("");
     });
-    libsResultPre.textContent = lines.join("\n").trim();
+    libsResultPre.innerHTML = lines.join("\n").trim();
   }
 
   async function serviceAction(name, action){

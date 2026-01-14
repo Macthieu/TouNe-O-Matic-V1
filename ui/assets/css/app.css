@@ -114,6 +114,14 @@ svg{ fill: currentColor; }
   box-shadow: var(--shadow);
 }
 
+.log-tag{
+  font-weight: 650;
+}
+.log-created{ color: #62d26f; }
+.log-updated{ color: #f1c55a; }
+.log-removed{ color: #ff7b7b; }
+.log-kept{ color: #8aa2c8; }
+
 /* Shell */
 .app-shell{
   height:100%;

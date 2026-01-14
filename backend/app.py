@@ -1553,7 +1553,7 @@ def services_status():
     if names:
         wanted = [n.strip() for n in names.split(",") if n.strip()]
     else:
-        wanted = ["shairport-sync.service", "librespot.service", "snapclient.service"]
+        wanted = ["shairport-sync.service", "librespot.service", "raspotify.service", "snapclient.service"]
     data = [_service_status(n) for n in wanted]
     return ok(data)
 
@@ -1792,6 +1792,20 @@ def snapcast_stream_set():
         return ok({"group_id": group_id, "stream_id": stream_id})
     except Exception as e:
         return err("snapcast set stream failed", 500, detail=str(e))
+
+
+@app.post("/api/snapcast/sources/enable")
+def snapcast_sources_enable():
+    script = Path("/srv/toune/repo/toune-o-matic/scripts/enable-snapserver-sources.sh")
+    if not script.exists():
+        return err("enable script not found", 404)
+    try:
+        res = subprocess.run(["/bin/sh", str(script)], capture_output=True, text=True, timeout=20)
+        if res.returncode != 0:
+            return err("enable sources failed", 500, detail=(res.stderr or res.stdout).strip())
+        return ok({"result": (res.stdout or "").strip()})
+    except Exception as e:
+        return err("enable sources failed", 500, detail=str(e))
 
 
 @app.post("/api/library/queue/random-next")
