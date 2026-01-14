@@ -5,6 +5,7 @@ import { onOutsideClick, toast } from "../utils.js";
 export async function playPaths(paths){
   try {
     await postJson("/mpd/add-many", {paths, clear: true, play: true});
+    await setQueue(paths);
   } catch (e){
     toast("Erreur: lecture impossible");
   }
@@ -13,6 +14,8 @@ export async function playPaths(paths){
 export async function queuePaths(paths){
   try {
     await postJson("/mpd/add-many", {paths, clear: false, play: false});
+    const current = (store.get().player.queue || []).map(t=>t.path).filter(Boolean);
+    await setQueue(current.concat(paths));
   } catch (e){
     toast("Erreur: ajout à la file");
   }
@@ -94,6 +97,47 @@ export async function deleteQueue(pos){
     await fetch(url, {method: "POST"});
   } catch {
     toast("Erreur: suppression file");
+  }
+}
+
+export async function clearQueue(){
+  try {
+    await postJson("/cmd", {cmd: "clear"});
+    await postJson("/queue", {paths: [], apply: false});
+  } catch {
+    toast("Erreur: vider la file");
+  }
+}
+
+export async function reorderQueue(paths){
+  try {
+    return await postJson("/queue", {paths, apply: true});
+  } catch {
+    toast("Erreur: réorganisation file");
+  }
+  return null;
+}
+
+export async function syncQueue(){
+  try {
+    return await postJson("/queue/sync");
+  } catch {
+    toast("Erreur: synchro file");
+  }
+  return null;
+}
+
+export async function fetchQueueStatus(){
+  if(AppConfig.transport !== "rest") return null;
+  try {
+    const res = await fetch(`${AppConfig.restBaseUrl}/queue/status`);
+    const body = await res.json().catch(()=>null);
+    if(!res.ok || body?.ok === false){
+      throw new Error(body?.error || `HTTP ${res.status}`);
+    }
+    return body.data;
+  } catch {
+    return null;
   }
 }
 
@@ -315,6 +359,13 @@ async function postJson(path, body){
     throw new Error(data?.error || `HTTP ${res.status}`);
   }
   return data;
+}
+
+async function setQueue(paths){
+  if(AppConfig.transport !== "rest") return;
+  const list = (paths || []).filter(Boolean);
+  if(!list.length) return;
+  await postJson("/queue", {paths: list, apply: false});
 }
 
 async function refreshPlaylists(){

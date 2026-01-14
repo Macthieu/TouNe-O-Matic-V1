@@ -1,0 +1,17 @@
+[Unit]
+Description=Toune-o-matic Command/State Daemon
+After=network.target mpd.service
+Wants=mpd.service
+
+[Service]
+User=pi
+Group=pi
+WorkingDirectory=/srv/toune/repo/toune-o-matic
+Environment="PATH=/srv/toune/venv/bin"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/srv/toune/venv/bin/python3 /srv/toune/repo/toune-o-matic/backend/daemon.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

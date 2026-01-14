@@ -3,6 +3,7 @@ import { $, $$, formatTime, toast, onOutsideClick, clamp } from "./utils.js";
 import { registerRoute, renderRoute, navigate } from "./router.js";
 import { buildMockLibrary } from "./services/mockdata.js";
 import { MPDClient } from "./services/mpd.js";
+import { fetchQueueStatus } from "./services/library.js";
 import { AppConfig } from "./config.js";
 
 // Pages
@@ -299,6 +300,7 @@ store.subscribe((st)=>{
 renderPlayerBar(store.get().player);
 renderQueuePane(store.get().player);
 renderHeader(store.get().player);
+initQueueBadge();
 
 function applyTheme(theme){
   document.documentElement.dataset.theme = theme;
@@ -407,6 +409,25 @@ function renderQueuePane(p){
     row.addEventListener("click", ()=>mpd.playAt(i));
     list.appendChild(row);
   });
+}
+
+async function initQueueBadge(){
+  const badge = $("#queueSyncBadge");
+  if(!badge) return;
+  async function refresh(){
+    const st = await fetchQueueStatus();
+    if(!badge.isConnected) return;
+    if(!st){
+      badge.classList.remove("is-bad");
+      badge.querySelector(".sync-text").textContent = "sync";
+      return;
+    }
+    const ok = !!st.match;
+    badge.classList.toggle("is-bad", !ok);
+    badge.querySelector(".sync-text").textContent = ok ? "sync" : "désync";
+  }
+  await refresh();
+  setInterval(refresh, 5000);
 }
 
 // Desktop queue clear

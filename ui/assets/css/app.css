@@ -71,6 +71,34 @@ svg{ fill: currentColor; }
   transition: width 160ms ease;
 }
 
+.sync-badge{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,.04);
+  font-size: 11px;
+  color: var(--muted);
+}
+.sync-badge.is-bad{
+  color: #ffb14d;
+  border-color: rgba(255,177,77,.4);
+  background: rgba(255,177,77,.12);
+}
+.sync-dot{
+  width:8px;
+  height:8px;
+  border-radius: 999px;
+  background: #3bd37d;
+  box-shadow: 0 0 0 2px rgba(59,211,125,.18);
+}
+.sync-badge.is-bad .sync-dot{
+  background: #ffb14d;
+  box-shadow: 0 0 0 2px rgba(255,177,77,.18);
+}
+
 /* Shell */
 .app-shell{
   height:100%;

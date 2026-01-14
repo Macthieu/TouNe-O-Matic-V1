@@ -29,6 +29,8 @@ MUSIC_ROOT = Path(os.environ.get("TOUNE_MUSIC_ROOT", "/mnt/libraries/music"))
 DOCS_ROOT = Path(os.environ.get("TOUNE_DOCS_ROOT", "/mnt/libraries/docs"))
 DB_PATH = Path(os.environ.get("TOUNE_DB_PATH", "/srv/toune/data/toune.db"))
 CACHE_DIR = Path(os.environ.get("TOUNE_CACHE_DIR", "/srv/toune/data/cache"))
+STATE_DIR = Path(os.environ.get("TOUNE_STATE_DIR", "/srv/toune/state"))
+QUEUE_DIR = STATE_DIR / "queue"
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 LASTFM_API_KEY = os.environ.get("LASTFM_API_KEY", "")
 DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN", "")
@@ -302,6 +304,151 @@ def _normalize_playlist_path(raw: str) -> Tuple[Optional[str], str]:
 
 def _strip_bom(line: str) -> str:
     return line.lstrip("\ufeff") if line else line
+
+
+def _atomic_write_file(path: Path, payload: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _read_state_file() -> Dict[str, Any]:
+    p = STATE_DIR / "state.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return {}
+
+
+def _write_cmd_file(lines: List[str]) -> None:
+    if not lines:
+        raise ValueError("empty commands")
+    payload = "\n".join(lines).rstrip() + "\n"
+    _atomic_write_file(STATE_DIR / "cmd.txt", payload)
+
+
+def _normalize_queue_path(path: str) -> Optional[Path]:
+    if not path:
+        return None
+    if path.startswith("http://") or path.startswith("https://"):
+        return None
+    p = Path(path)
+    if p.is_absolute():
+        return p
+    return MUSIC_ROOT / p
+
+
+def _write_queue_symlinks(paths: List[str]) -> Dict[str, int]:
+    QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    removed = 0
+    for p in QUEUE_DIR.iterdir():
+        try:
+            if p.is_symlink() or p.is_file():
+                p.unlink()
+                removed += 1
+        except Exception:
+            pass
+    created = 0
+    skipped = 0
+    for idx, raw in enumerate(paths, start=1):
+        abs_path = _normalize_queue_path(raw)
+        if not abs_path or not abs_path.exists():
+            skipped += 1
+            continue
+        name = f"{idx:06d} - {abs_path.name}"
+        link = QUEUE_DIR / name
+        try:
+            link.symlink_to(abs_path)
+            created += 1
+        except Exception:
+            skipped += 1
+    return {"created": created, "removed": removed, "skipped": skipped}
+
+
+def _read_queue_file() -> List[str]:
+    p = STATE_DIR / "queue.json"
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8", errors="ignore"))
+        if isinstance(data, list):
+            return [str(x) for x in data]
+    except Exception:
+        pass
+    return []
+
+
+def _queue_sync_status() -> Dict[str, Any]:
+    state = {
+        "queue_len": 0,
+        "mpd_len": 0,
+        "match": False,
+        "diff": 0,
+    }
+    try:
+        queue = _read_queue_file()
+        state["queue_len"] = len(queue)
+        with mpd_client() as c:
+            pl = c.playlistinfo()
+        mpd_paths = [item.get("file") for item in pl if item.get("file")]
+        state["mpd_len"] = len(mpd_paths)
+        state["match"] = queue == mpd_paths
+        state["diff"] = abs(len(queue) - len(mpd_paths))
+    except Exception:
+        pass
+    return state
+
+
+def _write_queue_file(paths: List[str]) -> None:
+    payload = json.dumps(paths, ensure_ascii=False)
+    _atomic_write_file(STATE_DIR / "queue.json", payload)
+
+
+def _apply_queue_to_mpd(paths: List[str]) -> None:
+    with mpd_client() as c:
+        try:
+            status = c.status()
+        except Exception:
+            status = {}
+        try:
+            current = c.currentsong()
+        except Exception:
+            current = {}
+        cur_file = current.get("file") if isinstance(current, dict) else None
+        state = (status.get("state") or "").lower()
+
+        c.clear()
+        for p in paths:
+            if p:
+                c.add(p)
+
+        if not paths:
+            return
+
+        if cur_file and cur_file in paths:
+            idx = paths.index(cur_file)
+        else:
+            idx = 0
+
+        if state == "play":
+            c.play(idx)
+        elif state == "pause":
+            c.play(idx)
+            c.pause(1)
+        elif state == "stop":
+            c.stop()
+        else:
+            c.play(idx)
+
+
+def _sync_queue_from_mpd(c: MPDClient) -> Dict[str, int]:
+    pl = c.playlistinfo()
+    paths = [item.get("file") for item in pl if item.get("file")]
+    _write_queue_file(paths)
+    return _write_queue_symlinks(paths)
 
 
 def _normalize_text_key(value: str) -> str:
@@ -1069,6 +1216,8 @@ def mpd_clear():
     try:
         with mpd_client() as c:
             c.clear()
+            _write_queue_file([])
+            _write_queue_symlinks([])
             return ok()
     except Exception as e:
         return err("clear failed", 500, detail=str(e))
@@ -1083,6 +1232,7 @@ def mpd_move():
     try:
         with mpd_client() as c:
             c.move(int(frm), int(to))
+            stats = _sync_queue_from_mpd(c)
             return ok()
     except Exception as e:
         return err("move failed", 500, detail=str(e))
@@ -1096,6 +1246,7 @@ def mpd_delete():
     try:
         with mpd_client() as c:
             c.delete(int(pos))
+            stats = _sync_queue_from_mpd(c)
             return ok()
     except Exception as e:
         return err("delete failed", 500, detail=str(e))
@@ -1110,6 +1261,7 @@ def mpd_add():
     try:
         with mpd_client() as c:
             c.add(p)
+            stats = _sync_queue_from_mpd(c)
             return ok()
     except Exception as e:
         return err("add failed", 500, detail=str(e))
@@ -1132,6 +1284,7 @@ def mpd_add_many():
                     c.add(p)
             if play:
                 c.play()
+            stats = _sync_queue_from_mpd(c)
         return ok({"added": len(paths), "cleared": clear, "played": play})
     except Exception as e:
         return err("add-many failed", 500, detail=str(e))
@@ -1145,6 +1298,72 @@ def mpd_queue():
             return ok(pl)
     except Exception as e:
         return err("queue failed", 500, detail=str(e))
+
+
+@app.get("/api/state")
+def state_read():
+    return ok(_read_state_file())
+
+
+@app.post("/api/cmd")
+def cmd_write():
+    data = request.get_json(silent=True) or {}
+    cmds = data.get("cmds") or []
+    cmd = (data.get("cmd") or "").strip()
+    if cmd:
+        cmds = [cmd]
+    if not cmds:
+        return err("missing cmd")
+    try:
+        lines = [str(c).strip() for c in cmds if str(c).strip()]
+        if not lines:
+            return err("missing cmd")
+        _write_cmd_file(lines)
+        return ok({"written": len(lines)})
+    except Exception as e:
+        return err("write cmd failed", 500, detail=str(e))
+
+
+@app.get("/api/queue")
+def queue_get():
+    return ok(_read_queue_file())
+
+
+@app.post("/api/queue")
+def queue_set():
+    data = request.get_json(silent=True) or {}
+    paths = data.get("paths") or []
+    apply = bool(data.get("apply"))
+    if not isinstance(paths, list):
+        return err("paths must be a list")
+    try:
+        path_list = [str(p) for p in paths]
+        if apply:
+            _apply_queue_to_mpd(path_list)
+            with mpd_client() as c:
+                stats = _sync_queue_from_mpd(c)
+        else:
+            _write_queue_file(path_list)
+            stats = _write_queue_symlinks(path_list)
+        return ok({"count": len(path_list), "applied": apply, **stats})
+    except Exception as e:
+        return err("queue update failed", 500, detail=str(e))
+
+
+@app.post("/api/queue/sync")
+def queue_sync():
+    try:
+        with mpd_client() as c:
+            stats = _sync_queue_from_mpd(c)
+            pl = c.playlistinfo()
+        return ok({"count": len(pl), **stats, "sync": _queue_sync_status()})
+    except Exception as e:
+        return err("queue sync failed", 500, detail=str(e))
+
+
+@app.get("/api/queue/status")
+def queue_status():
+    return ok(_queue_sync_status())
 
 
 @app.get("/api/radio/tags")
@@ -1749,6 +1968,8 @@ def playlists_load():
             for m in mapped:
                 c.add(m)
             c.play()
+            _write_queue_file(mapped)
+            _write_queue_symlinks(mapped)
         return ok({
             "loaded": name,
             "tracks_added": len(mapped),
@@ -1776,6 +1997,10 @@ def playlists_queue():
         with mpd_client() as c:
             for m in mapped:
                 c.add(m)
+            current = _read_queue_file()
+            merged = current + mapped
+            _write_queue_file(merged)
+            _write_queue_symlinks(merged)
         return ok({
             "queued": name,
             "tracks_added": len(mapped),

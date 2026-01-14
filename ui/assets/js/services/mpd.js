@@ -41,7 +41,7 @@ export class MPDClient {
       this._emit();
       return;
     }
-    await this._post("/mpd/play");
+    await this._cmd("play");
     await this._refresh();
   }
 
@@ -51,13 +51,14 @@ export class MPDClient {
       this._emit();
       return;
     }
-    await this._post("/mpd/pause?value=1");
+    await this._cmd("pause");
     await this._refresh();
   }
 
   async toggle(){
     const s = this._state.player.state;
     if(s === "play") return this.pause();
+    if(s === "pause") return this._cmd("resume");
     return this.play();
   }
 
@@ -73,7 +74,7 @@ export class MPDClient {
       this._emit();
       return;
     }
-    await this._post("/mpd/next");
+    await this._cmd("next");
     await this._refresh();
   }
 
@@ -89,7 +90,7 @@ export class MPDClient {
       this._emit();
       return;
     }
-    await this._post("/mpd/prev");
+    await this._cmd("prev");
     await this._refresh();
   }
 
@@ -122,7 +123,7 @@ export class MPDClient {
       this._emit();
       return;
     }
-    await this._post("/mpd/clear");
+    await this._cmd("clear");
     await this._refresh();
   }
 
@@ -133,7 +134,7 @@ export class MPDClient {
       this._emit();
       return;
     }
-    await this._post(`/mpd/seek?pos=${encodeURIComponent(seconds)}`);
+    await this._cmd(`seek ${seconds}`);
     await this._refresh();
   }
 
@@ -144,7 +145,7 @@ export class MPDClient {
       this._emit();
       return;
     }
-    await this._post(`/mpd/volume?value=${encodeURIComponent(next)}`);
+    await this._cmd(`volume ${next}`);
     await this._refresh();
   }
 
@@ -175,12 +176,21 @@ export class MPDClient {
     await this._fetchJson(path, {method: "POST"});
   }
 
+  async _cmd(cmd){
+    await this._fetchJson("/cmd", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({cmd}),
+    });
+  }
+
   async _refresh(){
     try {
-      const [status, queue] = await Promise.all([
-        this._fetchJson("/mpd/status"),
-        this._fetchJson("/mpd/queue"),
-      ]);
+      let status = await this._fetchJson("/state").catch(()=>null);
+      if(!status?.status){
+        status = await this._fetchJson("/mpd/status");
+      }
+      const queue = await this._fetchJson("/mpd/queue").catch(()=>[]);
       this._applyState(status, queue);
       this._emit();
     } catch {
@@ -191,7 +201,7 @@ export class MPDClient {
 
   _applyState(statusPayload, queuePayload){
     const st = statusPayload?.status || {};
-    const current = statusPayload?.current || null;
+    const current = statusPayload?.current || statusPayload?.song || null;
     const queue = Array.isArray(queuePayload) ? queuePayload : [];
     const player = this._state.player;
 

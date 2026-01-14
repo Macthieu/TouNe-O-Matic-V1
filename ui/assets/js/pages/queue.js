@@ -2,7 +2,7 @@ import { card, listRow, coverEl, button } from "../components/ui.js";
 import { AppConfig } from "../config.js";
 import { store } from "../store.js";
 import { toast } from "../utils.js";
-import { moveQueue, deleteQueue } from "../services/library.js";
+import { moveQueue, deleteQueue, reorderQueue, syncQueue, clearQueue, fetchQueueStatus } from "../services/library.js";
 
 export async function render(root){
   const st = store.get();
@@ -13,11 +13,22 @@ export async function render(root){
     } catch {}
   }});
   mixBtn.classList.toggle("is-active", !!st.player.random);
+  const syncBtn = button("Sync", {onClick: async ()=>{
+    const res = await syncQueue();
+    if(res?.ok) toast("File synchronisée");
+  }});
+  syncBtn.hidden = true;
   const c = card({
     title:"File d’attente",
     subtitle:"Drag & drop (démo UI)",
     actions:[
       mixBtn,
+      syncBtn,
+      button("Vider", {kind:"danger", onClick: async ()=>{
+        if(!window.confirm("Vider complètement la file ?")) return;
+        await clearQueue();
+        toast("File vidée");
+      }}),
       button("Ouvrir en bas", {onClick: ()=>document.getElementById("btnQueue")?.click()})
     ]
   });
@@ -26,6 +37,10 @@ export async function render(root){
   help.className = "muted small";
   help.textContent = "Astuce : tu peux déplacer les lignes (drag & drop) — c’est seulement visuel pour l’instant.";
   c.body.append(help);
+  const status = document.createElement("div");
+  status.className = "muted small";
+  status.style.marginTop = "6px";
+  c.body.append(status);
 
   const list = document.createElement("div");
   list.className = "list";
@@ -67,8 +82,14 @@ export async function render(root){
       const from = Number(ev.dataTransfer.getData("text/plain"));
       const to = i;
       if(Number.isFinite(from) && from!==to){
-        await moveQueue(from, to);
-        toast(`Déplacé ${from+1} → ${to+1}`);
+        const next = [...st.player.queue];
+        const [item] = next.splice(from, 1);
+        next.splice(to, 0, item);
+        const paths = next.map(t=>t.path).filter(Boolean);
+        const res = await reorderQueue(paths);
+        if(res?.ok){
+          toast(`Déplacé ${from+1} → ${to+1}`);
+        }
       }
     });
     list.append(row);
@@ -77,9 +98,32 @@ export async function render(root){
   c.body.append(list);
   root.append(c.root);
 
+  async function refreshStatus(){
+    const st = await fetchQueueStatus();
+    if(!status.isConnected) return;
+    if(!st){
+      status.textContent = "";
+      syncBtn.hidden = true;
+      return;
+    }
+    const badge = st.match ? "✓ synchro" : `⚠ désync (${st.queue_len}/${st.mpd_len})`;
+    status.textContent = `État: ${badge}`;
+    syncBtn.hidden = !!st.match;
+  }
+
   store.subscribe((next)=>{
     mixBtn.classList.toggle("is-active", !!next.player.random);
   });
+  await refreshStatus();
+  const statusTimer = setInterval(refreshStatus, 5000);
+  if(root){
+    const stop = store.subscribe(()=>{
+      if(!root.isConnected){
+        clearInterval(statusTimer);
+        stop();
+      }
+    });
+  }
 }
 
 function albumArtUrl(track, size){
