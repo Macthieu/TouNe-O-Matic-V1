@@ -3,7 +3,7 @@ import { AppConfig } from "../config.js";
 import { store } from "../store.js";
 import { formatTime, toast } from "../utils.js";
 import { navigate } from "../router.js";
-import { playPaths, showAddMenu, playPlaylist, queuePlaylist, removeFromPlaylist, moveInPlaylist, renamePlaylist, deletePlaylist, createPlaylist, importPlaylist } from "../services/library.js";
+import { playPaths, showAddMenu, playPlaylist, queuePlaylist, removeFromPlaylist, moveInPlaylist, renamePlaylist, deletePlaylist, createPlaylist, importPlaylistFile } from "../services/library.js";
 
 const playlistCoverCache = new Map();
 const playlistCoverInFlight = new Map();
@@ -215,10 +215,11 @@ async function openImportDialog(){
     const name = window.prompt("Nom de la playlist importée", suggested);
     if(!name) return;
     try {
-      const content = await file.text();
-      await importPlaylist(name, content);
+      const res = await importPlaylistFile(name, file);
+      if(!res?.ok) return;
+      const savedName = res?.data?.name || name;
       toast("Playlist importée");
-      navigate("playlists", new URLSearchParams({name}));
+      navigate("playlists", new URLSearchParams({name: savedName}));
     } catch {
       toast("Erreur: import playlist");
     }

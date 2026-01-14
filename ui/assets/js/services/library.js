@@ -132,13 +132,52 @@ export async function deletePlaylist(name){
   }
 }
 
+export async function repairPlaylist(name){
+  try {
+    const url = `${AppConfig.restBaseUrl}/playlists/repair?name=${encodeURIComponent(name)}`;
+    const res = await fetch(url, {method: "POST"});
+    const data = await res.json().catch(()=>null);
+    if(!res.ok || data?.ok === false){
+      throw new Error(data?.error || `HTTP ${res.status}`);
+    }
+    return data;
+  } catch (e){
+    toast(`Erreur: réparation playlist (${e?.message || "échec"})`);
+  }
+  return null;
+}
+
 export async function importPlaylist(name, content){
   try {
-    await postJson("/playlists/import", {name, content});
+    const res = await postJson("/playlists/import", {name, content});
     await refreshPlaylists();
+    return res;
   } catch {
     toast("Erreur: import playlist");
   }
+  return null;
+}
+
+export async function importPlaylistFile(name, file){
+  if(AppConfig.transport !== "rest") return null;
+  try {
+    const form = new FormData();
+    if(name) form.set("name", name);
+    form.set("file", file);
+    const res = await fetch(`${AppConfig.restBaseUrl}/playlists/import-file`, {
+      method: "POST",
+      body: form,
+    });
+    const data = await res.json().catch(()=>null);
+    if(!res.ok || data?.ok === false){
+      throw new Error(data?.error || `HTTP ${res.status}`);
+    }
+    await refreshPlaylists();
+    return data;
+  } catch (e){
+    toast(`Erreur: import playlist (${e?.message || "échec"})`);
+  }
+  return null;
 }
 
 export async function fetchFavourites(){

@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Iterable
 import re
+import unicodedata
 
 from flask import Flask, jsonify, request, send_file, make_response
 from PIL import Image
@@ -283,7 +284,7 @@ def _radio_station_payload(item: Dict[str, Any]) -> Dict[str, Any]:
 def _normalize_playlist_path(raw: str) -> Tuple[Optional[str], str]:
     if not raw:
         return None, "empty"
-    raw = raw.strip()
+    raw = raw.strip().lstrip("\ufeff")
     if raw.startswith("file://"):
         raw = raw[7:]
     raw = raw.replace("\\", "/")
@@ -298,6 +299,351 @@ def _normalize_playlist_path(raw: str) -> Tuple[Optional[str], str]:
         return None, "outside"
     return raw, "relative"
 
+
+def _strip_bom(line: str) -> str:
+    return line.lstrip("\ufeff") if line else line
+
+
+def _normalize_text_key(value: str) -> str:
+    if not value:
+        return ""
+    text = unicodedata.normalize("NFKD", value)
+    text = text.replace("’", "'").replace("‘", "'").replace("`", "'").replace("´", "'")
+    text = text.replace("–", "-").replace("—", "-").replace("‐", "-")
+    text = text.lower().strip()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def _normalize_title_key(value: str) -> str:
+    if not value:
+        return ""
+    text = _normalize_text_key(value)
+    text = re.sub(r"^\d+\s*[-._]\s*", "", text)
+    text = re.sub(r"^\d+\s+", "", text)
+    text = re.sub(r"\s*\(\d+\)$", "", text)
+    return text
+
+
+def _parse_extinf(line: str) -> Tuple[str, str]:
+    if not line.startswith("#EXTINF"):
+        return "", ""
+    if "," not in line:
+        return "", ""
+    payload = line.split(",", 1)[1].strip()
+    if " - " in payload:
+        artist, _, title = payload.partition(" - ")
+        return artist.strip(), title.strip()
+    return "", payload.strip()
+
+
+def _add_unique(mapping: Dict[str, Optional[str]], key: str, value: str):
+    if not key:
+        return
+    if key not in mapping:
+        mapping[key] = value
+        return
+    if mapping[key] == value:
+        return
+    mapping[key] = None
+
+
+def _build_album_stem_lookup(album_dir: Path) -> Dict[str, Optional[str]]:
+    mapping: Dict[str, Optional[str]] = {}
+    try:
+        for p in album_dir.iterdir():
+            if not p.is_file():
+                continue
+            stem = _normalize_title_key(p.stem)
+            if not stem:
+                continue
+            _add_unique(mapping, stem, str(p))
+    except Exception:
+        pass
+    return mapping
+
+
+def _build_track_lookup() -> Dict[str, Dict[str, Optional[str]]]:
+    with _db_connect() as conn:
+        rows = conn.execute("SELECT path, artist, title FROM track").fetchall()
+    artist_title: Dict[str, Optional[str]] = {}
+    title_only: Dict[str, Optional[str]] = {}
+    stem_only: Dict[str, Optional[str]] = {}
+    for r in rows:
+        path = r["path"]
+        artist = _normalize_text_key(r["artist"] or "")
+        title = _normalize_title_key(r["title"] or "")
+        if artist and title:
+            _add_unique(artist_title, f"{artist}||{title}", path)
+        if title:
+            _add_unique(title_only, title, path)
+        stem = _normalize_title_key(Path(path).stem)
+        if stem:
+            _add_unique(stem_only, stem, path)
+    return {
+        "artist_title": artist_title,
+        "title": title_only,
+        "stem": stem_only,
+    }
+
+
+def _import_playlist_content(name: str, content: str) -> Dict[str, Any]:
+    if not name.strip():
+        raise ValueError("missing playlist name")
+    if not content or not content.strip():
+        raise ValueError("missing content")
+    PLAYLISTS_DIR.mkdir(parents=True, exist_ok=True)
+    p = _playlist_path(name)
+    lines = content.splitlines()
+    out: List[str] = []
+    if not lines or not lines[0].strip().startswith("#EXTM3U"):
+        out.append("#EXTM3U")
+    total_tracks = 0
+    normalized = 0
+    skipped = 0
+    remapped_meta = 0
+    remapped_title = 0
+    remapped_stem = 0
+    last_extinf_artist = ""
+    last_extinf_title = ""
+    lookup: Optional[Dict[str, Dict[str, Optional[str]]]] = None
+    album_cache: Dict[str, Dict[str, Optional[str]]] = {}
+    for ln in lines:
+        ln = _strip_bom(ln.rstrip("\n"))
+        if not ln:
+            continue
+        if ln.startswith("#"):
+            artist, title = _parse_extinf(ln)
+            if artist or title:
+                last_extinf_artist = artist
+                last_extinf_title = title
+            out.append(ln)
+            continue
+        total_tracks += 1
+        mapped, reason = _normalize_playlist_path(ln)
+        if not mapped:
+            out.append(ln)
+            skipped += 1
+            last_extinf_artist = ""
+            last_extinf_title = ""
+            continue
+        if mapped.startswith("http://") or mapped.startswith("https://"):
+            out.append(mapped)
+            normalized += 1
+            last_extinf_artist = ""
+            last_extinf_title = ""
+            continue
+        abs_path = MUSIC_ROOT / mapped
+        if abs_path.exists():
+            out.append(mapped)
+            normalized += 1
+            last_extinf_artist = ""
+            last_extinf_title = ""
+            continue
+        album_dir = abs_path.parent
+        if album_dir.exists():
+            cache_key = str(album_dir)
+            if cache_key not in album_cache:
+                album_cache[cache_key] = _build_album_stem_lookup(album_dir)
+            album_map = album_cache[cache_key]
+            title_key = _normalize_title_key(last_extinf_title) if last_extinf_title else ""
+            if title_key:
+                candidate = album_map.get(title_key)
+                if candidate:
+                    rel = str(Path(candidate).relative_to(MUSIC_ROOT))
+                    out.append(rel)
+                    remapped_meta += 1
+                    last_extinf_artist = ""
+                    last_extinf_title = ""
+                    continue
+            stem_key = _normalize_title_key(Path(mapped).stem)
+            if stem_key:
+                candidate = album_map.get(stem_key)
+                if candidate:
+                    rel = str(Path(candidate).relative_to(MUSIC_ROOT))
+                    out.append(rel)
+                    remapped_stem += 1
+                    last_extinf_artist = ""
+                    last_extinf_title = ""
+                    continue
+        if last_extinf_artist or last_extinf_title:
+            if lookup is None:
+                lookup = _build_track_lookup()
+            artist_key = _normalize_text_key(last_extinf_artist)
+            title_key = _normalize_title_key(last_extinf_title)
+            candidate: Optional[str] = None
+            if artist_key and title_key:
+                candidate = lookup["artist_title"].get(f"{artist_key}||{title_key}")
+                if candidate:
+                    out.append(candidate)
+                    remapped_meta += 1
+                    last_extinf_artist = ""
+                    last_extinf_title = ""
+                    continue
+            if title_key:
+                candidate = lookup["title"].get(title_key)
+                if candidate:
+                    out.append(candidate)
+                    remapped_title += 1
+                    last_extinf_artist = ""
+                    last_extinf_title = ""
+                    continue
+        stem_key = _normalize_title_key(Path(mapped).stem)
+        if stem_key:
+            if lookup is None:
+                lookup = _build_track_lookup()
+            candidate = lookup["stem"].get(stem_key)
+            if candidate:
+                out.append(candidate)
+                remapped_stem += 1
+                last_extinf_artist = ""
+                last_extinf_title = ""
+                continue
+        out.append(mapped)
+        skipped += 1
+        last_extinf_artist = ""
+        last_extinf_title = ""
+    p.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+    return {
+        "name": p.name,
+        "tracks_in_file": total_tracks,
+        "normalized": normalized,
+        "remapped_by_meta": remapped_meta,
+        "remapped_by_title": remapped_title,
+        "remapped_by_filename": remapped_stem,
+        "skipped": skipped,
+    }
+
+
+def _repair_playlist_lines(lines: List[str]) -> Tuple[List[str], Dict[str, Any]]:
+    out: List[str] = []
+    total_tracks = 0
+    unchanged = 0
+    updated = 0
+    normalized = 0
+    remapped_meta = 0
+    remapped_title = 0
+    remapped_stem = 0
+    skipped = 0
+    last_extinf_artist = ""
+    last_extinf_title = ""
+    lookup: Optional[Dict[str, Dict[str, Optional[str]]]] = None
+    album_cache: Dict[str, Dict[str, Optional[str]]] = {}
+    for ln in lines:
+        raw = _strip_bom(ln.rstrip("\n"))
+        if not raw:
+            continue
+        if raw.startswith("#"):
+            artist, title = _parse_extinf(raw)
+            if artist or title:
+                last_extinf_artist = artist
+                last_extinf_title = title
+            out.append(raw)
+            continue
+        total_tracks += 1
+        mapped, _ = _normalize_playlist_path(raw)
+        if not mapped:
+            out.append(raw)
+            skipped += 1
+            last_extinf_artist = ""
+            last_extinf_title = ""
+            continue
+        if mapped.startswith("http://") or mapped.startswith("https://"):
+            out.append(mapped)
+            normalized += 1
+            last_extinf_artist = ""
+            last_extinf_title = ""
+            continue
+        abs_path = MUSIC_ROOT / mapped
+        if abs_path.exists():
+            out.append(mapped)
+            normalized += 1
+            if mapped != raw:
+                updated += 1
+            else:
+                unchanged += 1
+            last_extinf_artist = ""
+            last_extinf_title = ""
+            continue
+        album_dir = abs_path.parent
+        if album_dir.exists():
+            cache_key = str(album_dir)
+            if cache_key not in album_cache:
+                album_cache[cache_key] = _build_album_stem_lookup(album_dir)
+            album_map = album_cache[cache_key]
+            title_key = _normalize_title_key(last_extinf_title) if last_extinf_title else ""
+            if title_key:
+                candidate = album_map.get(title_key)
+                if candidate:
+                    rel = str(Path(candidate).relative_to(MUSIC_ROOT))
+                    out.append(rel)
+                    updated += 1
+                    remapped_meta += 1
+                    last_extinf_artist = ""
+                    last_extinf_title = ""
+                    continue
+            stem_key = _normalize_title_key(Path(mapped).stem)
+            if stem_key:
+                candidate = album_map.get(stem_key)
+                if candidate:
+                    rel = str(Path(candidate).relative_to(MUSIC_ROOT))
+                    out.append(rel)
+                    updated += 1
+                    remapped_stem += 1
+                    last_extinf_artist = ""
+                    last_extinf_title = ""
+                    continue
+        if last_extinf_artist or last_extinf_title:
+            if lookup is None:
+                lookup = _build_track_lookup()
+            artist_key = _normalize_text_key(last_extinf_artist)
+            title_key = _normalize_title_key(last_extinf_title)
+            candidate: Optional[str] = None
+            if artist_key and title_key:
+                candidate = lookup["artist_title"].get(f"{artist_key}||{title_key}")
+                if candidate:
+                    out.append(candidate)
+                    updated += 1
+                    remapped_meta += 1
+                    last_extinf_artist = ""
+                    last_extinf_title = ""
+                    continue
+            if title_key:
+                candidate = lookup["title"].get(title_key)
+                if candidate:
+                    out.append(candidate)
+                    updated += 1
+                    remapped_title += 1
+                    last_extinf_artist = ""
+                    last_extinf_title = ""
+                    continue
+        stem_key = _normalize_title_key(Path(mapped).stem)
+        if stem_key:
+            if lookup is None:
+                lookup = _build_track_lookup()
+            candidate = lookup["stem"].get(stem_key)
+            if candidate:
+                out.append(candidate)
+                updated += 1
+                remapped_stem += 1
+                last_extinf_artist = ""
+                last_extinf_title = ""
+                continue
+        out.append(mapped)
+        skipped += 1
+        last_extinf_artist = ""
+        last_extinf_title = ""
+    stats = {
+        "tracks_in_file": total_tracks,
+        "normalized": normalized,
+        "updated": updated,
+        "unchanged": unchanged,
+        "remapped_by_meta": remapped_meta,
+        "remapped_by_title": remapped_title,
+        "remapped_by_filename": remapped_stem,
+        "skipped": skipped,
+    }
+    return out, stats
 
 def _playlist_entry_info(raw_path: str) -> Dict[str, Any]:
     mapped, reason = _normalize_playlist_path(raw_path)
@@ -1233,33 +1579,36 @@ def playlists_import():
         return err("missing playlist name")
     if not content.strip():
         return err("missing content")
-    PLAYLISTS_DIR.mkdir(parents=True, exist_ok=True)
-    p = _playlist_path(name)
-    lines = content.splitlines()
-    out: List[str] = []
-    if not lines or not lines[0].strip().startswith("#EXTM3U"):
-        out.append("#EXTM3U")
-    added = 0
-    kept = 0
-    skipped = 0
-    for ln in lines:
-        ln = ln.rstrip("\n")
-        if not ln:
-            continue
-        if ln.startswith("#"):
-            out.append(ln)
-            continue
-        mapped, reason = _normalize_playlist_path(ln)
-        if not mapped:
-            out.append(ln)
-            skipped += 1
-            continue
-        out.append(mapped)
-        if reason in ("absolute", "relative", "url"):
-            added += 1
-        kept += 1
-    p.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
-    return ok({"name": p.name, "tracks_in_file": kept, "normalized": added, "skipped": skipped})
+    try:
+        payload = _import_playlist_content(name, content)
+    except ValueError as e:
+        return err(str(e))
+    except Exception as e:
+        return err("import failed", 500, detail=str(e))
+    return ok(payload)
+
+
+@app.post("/api/playlists/import-file")
+def playlists_import_file():
+    name = (request.form.get("name") or "").strip()
+    file = request.files.get("file")
+    if not file:
+        return err("missing file")
+    if not name:
+        name = (file.filename or "").strip()
+    if not name:
+        return err("missing playlist name")
+    raw = file.read() or b""
+    if not raw.strip():
+        return err("missing content")
+    content = raw.decode("utf-8-sig", errors="replace")
+    try:
+        payload = _import_playlist_content(name, content)
+    except ValueError as e:
+        return err(str(e))
+    except Exception as e:
+        return err("import failed", 500, detail=str(e))
+    return ok(payload)
 
 
 @app.post("/api/playlists/rename")
@@ -1277,6 +1626,31 @@ def playlists_rename():
         return err("destination exists", 409)
     src_path.rename(dst_path)
     return ok({"name": dst_path.name})
+
+
+@app.post("/api/playlists/repair")
+def playlists_repair():
+    name = (request.args.get("name") or "").strip()
+    dry = (request.args.get("dry") or "").strip().lower() in ("1", "true", "yes")
+    if not name:
+        data = request.get_json(silent=True) or {}
+        name = (data.get("name") or "").strip()
+        dry = bool(data.get("dry")) if data else dry
+    if not name:
+        return err("missing playlist name")
+    p = _playlist_path(name)
+    if not p.exists():
+        return err("playlist not found", 404)
+    try:
+        lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+        out, stats = _repair_playlist_lines(lines)
+        if not dry:
+            p.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+        payload = {"name": p.name, "dry": dry}
+        payload.update(stats)
+        return ok(payload)
+    except Exception as e:
+        return err("repair failed", 500, detail=str(e))
 
 
 @app.post("/api/playlists/append")
@@ -1311,7 +1685,7 @@ def playlists_move():
     if not p.exists():
         return err("playlist not found", 404)
     try:
-        lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+        lines = [_strip_bom(ln) for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
         header = [ln for ln in lines if ln.startswith("#")]
         tracks = [ln for ln in lines if ln and not ln.startswith("#")]
         frm = int(frm)
@@ -1340,7 +1714,7 @@ def playlists_remove():
     if not p.exists():
         return err("playlist not found", 404)
     try:
-        lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+        lines = [_strip_bom(ln) for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
         kept = []
         removed = 0
         for ln in lines:
@@ -1365,7 +1739,7 @@ def playlists_load():
         return err("playlist not found", 404)
 
     try:
-        lines = [ln.strip() for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
+        lines = [_strip_bom(ln).strip() for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
         tracks = [ln for ln in lines if ln and not ln.startswith("#")]
         entries = [_playlist_entry_info(t) for t in tracks]
         mapped = [e["path"] for e in entries if e.get("available")]
@@ -1394,7 +1768,7 @@ def playlists_queue():
     if not p.exists():
         return err("playlist not found", 404)
     try:
-        lines = [ln.strip() for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
+        lines = [_strip_bom(ln).strip() for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
         tracks = [ln for ln in lines if ln and not ln.startswith("#")]
         entries = [_playlist_entry_info(t) for t in tracks]
         mapped = [e["path"] for e in entries if e.get("available")]
@@ -1421,7 +1795,7 @@ def playlists_info():
     if not p.exists():
         return err("playlist not found", 404)
     try:
-        lines = [ln.strip() for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
+        lines = [_strip_bom(ln).strip() for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
         tracks = [ln for ln in lines if ln and not ln.startswith("#")]
         entries = [_playlist_entry_info(t) for t in tracks]
         mapped = [e["path"] for e in entries if e.get("path") and not str(e.get("path")).startswith("http")]
@@ -1515,7 +1889,7 @@ def _list_playlists() -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     for p in sorted(PLAYLISTS_DIR.glob("*.m3u")):
         try:
-            lines = [ln.strip() for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
+            lines = [_strip_bom(ln).strip() for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
             tracks = [ln for ln in lines if ln and not ln.startswith("#")]
             items.append({"name": p.name, "tracks": len(tracks)})
         except Exception:
