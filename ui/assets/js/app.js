@@ -4,6 +4,7 @@ import { registerRoute, renderRoute, navigate } from "./router.js";
 import { buildMockLibrary } from "./services/mockdata.js";
 import { MPDClient } from "./services/mpd.js";
 import { fetchQueueStatus, fetchCmdStatus } from "./services/library.js";
+import { fetchAirplayStatus } from "./services/airplay.js";
 import { AppConfig } from "./config.js";
 
 // Pages
@@ -80,6 +81,19 @@ mpd.onUpdate((nextState)=>{
   // mpd emits whole state; merge only player for now
   store.set({ player: nextState.player });
 });
+
+// AirPlay status (best-effort)
+  if(AppConfig.transport !== "mock"){
+    const airplayRefreshMs = Math.max(2000, AppConfig.refreshMs || 1000);
+    const refreshAirplay = async ()=>{
+      const data = await fetchAirplayStatus();
+      store.set({
+        airplay: data || { active: false, status: "Unavailable", title: "", artist: "", album: "", art: "", source: "airplay" }
+      });
+    };
+  await refreshAirplay();
+  setInterval(refreshAirplay, airplayRefreshMs);
+}
 
 // Drawer behavior
 const drawer = $("#drawer");
@@ -199,7 +213,9 @@ volRange?.addEventListener("input", async ()=>{
 
 // More menu
 const menu = $("#menuMore");
+const menuOutput = $("#menuOutput");
 let detachOutside = null;
+let detachOutputOutside = null;
 
 function openMenu(){
   menu.hidden = false;
@@ -221,6 +237,28 @@ $("#mnuResetDemo")?.addEventListener("click", ()=>{
   closeMenu();
   localStorage.removeItem("toune.theme");
   location.reload();
+});
+
+function openOutputMenu(){
+  if(!menuOutput) return;
+  menuOutput.hidden = false;
+  refreshOutputMenu();
+  detachOutputOutside?.();
+  detachOutputOutside = onOutsideClick(menuOutput, closeOutputMenu);
+}
+function closeOutputMenu(){
+  if(!menuOutput) return;
+  menuOutput.hidden = true;
+  detachOutputOutside?.(); detachOutputOutside = null;
+}
+$("#btnOutput")?.addEventListener("click", async ()=>{
+  if(!menuOutput) return;
+  if(menuOutput.hidden) openOutputMenu();
+  else closeOutputMenu();
+});
+$("#mnuOutputSettings")?.addEventListener("click", ()=>{
+  closeOutputMenu();
+  navigate("settings");
 });
 
 // Mini player click -> now playing
@@ -293,11 +331,11 @@ $("#btnVol")?.addEventListener("click", async ()=>{
 
 // Bind store -> UI
 store.subscribe((st)=>{
-  renderPlayerBar(st.player);
+  renderPlayerBar(st);
   renderQueuePane(st.player);
   renderHeader(st.player);
 });
-renderPlayerBar(store.get().player);
+renderPlayerBar(store.get());
 renderQueuePane(store.get().player);
 renderHeader(store.get().player);
 initQueueBadge();
@@ -320,20 +358,40 @@ async function loadLibrary(){
   }
 }
 
-function renderPlayerBar(p){
+function renderPlayerBar(state){
+  const p = state.player;
+  const ap = state.airplay || {};
+  const airplayActive = !!ap.active;
+  const displayTitle = airplayActive ? (ap.title || "AirPlay") : (p.track?.title || "—");
+  const displayArtist = airplayActive ? (ap.artist || ap.album || "Source externe") : (p.track?.artist || "—");
+  const displayArt = airplayActive ? airplayArtUrl(ap) : albumArtUrl(p.track, 160);
+
   // mini meta
-  $("#miniTitle").textContent = p.track?.title || "—";
-  $("#miniArtist").textContent = p.track?.artist || "—";
+  $("#miniTitle").textContent = displayTitle;
+  $("#miniArtist").textContent = displayArtist;
   const miniCover = $("#miniCover");
   if(miniCover){
-    const art = albumArtUrl(p.track, 160);
-    miniCover.style.backgroundImage = art ? `url("${art}")` : "";
+    miniCover.style.backgroundImage = displayArt ? `url("${displayArt}")` : "";
     miniCover.style.backgroundSize = "cover";
     miniCover.style.backgroundPosition = "center";
   }
 
-  $("#tCur").textContent = formatTime(p.elapsed || 0);
-  $("#tDur").textContent = formatTime(p.duration || 0);
+  if(airplayActive){
+    $("#tCur").textContent = "—";
+    $("#tDur").textContent = "—";
+    if(seek){
+      seek.value = "0";
+      seek.setAttribute("disabled", "disabled");
+      seek.classList.add("is-disabled");
+    }
+  } else {
+    $("#tCur").textContent = formatTime(p.elapsed || 0);
+    $("#tDur").textContent = formatTime(p.duration || 0);
+    if(seek){
+      seek.removeAttribute("disabled");
+      seek.classList.remove("is-disabled");
+    }
+  }
 
   // progress bar (avoid snapping while user is seeking)
   if(!seeking && seek){
@@ -349,6 +407,22 @@ function renderPlayerBar(p){
       : '<path d="M8 5v14l11-7z"/>';
   }
 
+  const lockMsg = "Lecture via AirPlay — contrôle depuis l’app source";
+  const lockControls = airplayActive;
+  for(const id of ["btnPlayPause", "btnNext", "btnPrev"]){
+    const btn = document.getElementById(id);
+    if(!btn) continue;
+    if(lockControls){
+      btn.setAttribute("disabled", "disabled");
+      btn.classList.add("is-disabled");
+      btn.title = lockMsg;
+    } else {
+      btn.removeAttribute("disabled");
+      btn.classList.remove("is-disabled");
+      btn.title = btn.getAttribute("aria-label") || "";
+    }
+  }
+
   // queue sheet
   $("#queueSummary").textContent = `${p.queue.length} titres • ${p.name} • Vol ${p.volume}%`;
   renderQueueSheet(p);
@@ -361,6 +435,61 @@ function albumArtUrl(track, size){
   url.searchParams.set("album", track.album);
   if(size) url.searchParams.set("size", String(size));
   return url.toString();
+}
+
+function airplayArtUrl(ap){
+  if(!ap?.art) return "";
+  try {
+    return new URL(ap.art, window.location.origin).toString();
+  } catch {
+    return "";
+  }
+}
+
+async function fetchJson(path, opts){
+  const res = await fetch(`${AppConfig.restBaseUrl}${path}`, opts);
+  if(!res.ok) throw new Error(`HTTP ${res.status}`);
+  const body = await res.json();
+  if(!body?.ok) throw new Error(body?.error || "API error");
+  return body.data;
+}
+
+async function refreshOutputMenu(){
+  const airplayBtn = $("#mnuOutputAirplay");
+  const btBtn = $("#mnuOutputBluetooth");
+  if(!airplayBtn || !btBtn || AppConfig.transport !== "rest") return;
+  try {
+    const ap = await fetchJson("/airplay/targets");
+    const apLabel = ap?.active ? `AirPlay: ON (${ap.current || "—"})` : "AirPlay: OFF";
+    airplayBtn.textContent = apLabel;
+    airplayBtn.onclick = async ()=>{
+      const next = !ap?.active;
+      await fetchJson("/airplay/send", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({enabled: next})
+      });
+      await refreshOutputMenu();
+    };
+  } catch {
+    airplayBtn.textContent = "AirPlay: —";
+  }
+  try {
+    const bt = await fetchJson("/bluetooth/targets");
+    const btLabel = bt?.active ? `Bluetooth: ON (${bt.current || "—"})` : "Bluetooth: OFF";
+    btBtn.textContent = btLabel;
+    btBtn.onclick = async ()=>{
+      const next = !bt?.active;
+      await fetchJson("/bluetooth/send", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({enabled: next})
+      });
+      await refreshOutputMenu();
+    };
+  } catch {
+    btBtn.textContent = "Bluetooth: —";
+  }
 }
 
 function renderHeader(p){

@@ -158,6 +158,99 @@ export async function render(root){
   sources.body.append(sourcesWrap);
   root.append(sources.root);
 
+  const airplayOut = card({ title:"Sortie AirPlay", subtitle:"Envoyer le son vers un appareil AirPlay" });
+  const airplayWrap = document.createElement("div");
+  airplayWrap.style.display = "grid";
+  airplayWrap.style.gap = "10px";
+  const airplayInfo = document.createElement("div");
+  airplayInfo.className = "muted small";
+  const airplayRow = document.createElement("div");
+  airplayRow.style.display = "grid";
+  airplayRow.style.gridTemplateColumns = "1fr auto";
+  airplayRow.style.alignItems = "center";
+  airplayRow.style.gap = "12px";
+  const airplaySelect = document.createElement("select");
+  airplaySelect.className = "input";
+  airplaySelect.style.height = "36px";
+  airplaySelect.style.padding = "0 10px";
+  airplaySelect.style.maxWidth = "420px";
+  const airplayApply = button("Appliquer", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    const sink = airplaySelect.value;
+    if(!sink) return;
+    await setAirplayTarget(sink);
+    await refreshAirplayTargets();
+  }});
+  const airplayToggle = button("Activer envoi", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    const next = airplayToggle.getAttribute("data-active") !== "true";
+    await toggleAirplaySend(next);
+    await refreshAirplayTargets();
+  }});
+  const airplayRefresh = button("Rafraîchir", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    await refreshAirplayTargets();
+  }});
+  airplayRow.append(airplaySelect, airplayApply, airplayToggle, airplayRefresh);
+  airplayWrap.append(airplayInfo, airplayRow);
+  airplayOut.body.append(airplayWrap);
+  root.append(airplayOut.root);
+
+  const btOut = card({ title:"Sortie Bluetooth", subtitle:"Connecter un appareil et envoyer le son" });
+  const btWrap = document.createElement("div");
+  btWrap.style.display = "grid";
+  btWrap.style.gap = "10px";
+  const btInfo = document.createElement("div");
+  btInfo.className = "muted small";
+  const btRow = document.createElement("div");
+  btRow.style.display = "grid";
+  btRow.style.gridTemplateColumns = "1fr auto";
+  btRow.style.alignItems = "center";
+  btRow.style.gap = "12px";
+  const btSelect = document.createElement("select");
+  btSelect.className = "input";
+  btSelect.style.height = "36px";
+  btSelect.style.padding = "0 10px";
+  btSelect.style.maxWidth = "420px";
+  const btApply = button("Appliquer sortie", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    const sink = btSelect.value;
+    if(!sink) return;
+    await setBluetoothTarget(sink);
+    await refreshBluetoothTargets();
+  }});
+  const btToggle = button("Activer envoi", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    const next = btToggle.getAttribute("data-active") !== "true";
+    await toggleBluetoothSend(next);
+    await refreshBluetoothTargets();
+  }});
+  const btRefresh = button("Rafraîchir sorties", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    await refreshBluetoothTargets();
+  }});
+  btRow.append(btSelect, btApply, btToggle, btRefresh);
+
+  const btDevList = document.createElement("div");
+  btDevList.className = "list";
+  const btDevActions = document.createElement("div");
+  btDevActions.style.display = "flex";
+  btDevActions.style.gap = "8px";
+  const btScanBtn = button("Scanner Bluetooth", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    await scanBluetooth();
+    await refreshBluetoothDevices();
+  }});
+  const btListBtn = button("Rafraîchir appareils", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    await refreshBluetoothDevices();
+  }});
+  btDevActions.append(btScanBtn, btListBtn);
+
+  btWrap.append(btInfo, btRow, btDevActions, btDevList);
+  btOut.body.append(btWrap);
+  root.append(btOut.root);
+
   const multi = card({ title:"Multiroom (Snapcast)", subtitle:"Latence clients (ms)" });
   const multiWrap = document.createElement("div");
   multiWrap.style.display = "grid";
@@ -326,6 +419,9 @@ export async function render(root){
   let libsData = null;
   let lastDocsRunning = false;
   let docsPoll = null;
+  let airplayState = {sinks: [], current: "", active: false};
+  let btState = {sinks: [], current: "", active: false};
+  let btDevices = [];
 
   async function refreshStatus(){
     const status = await fetchStatus();
@@ -428,6 +524,244 @@ export async function render(root){
         latencyList.append(row);
       });
     } catch {}
+  }
+
+  async function refreshAirplayTargets(){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/airplay/targets`);
+      const body = await res.json();
+      if(!body?.ok) return;
+      airplayState = body.data || airplayState;
+      const sinks = airplayState.sinks || [];
+      airplaySelect.innerHTML = "";
+      if(!sinks.length){
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "Aucun appareil AirPlay détecté";
+        airplaySelect.append(opt);
+        airplaySelect.disabled = true;
+      } else {
+        airplaySelect.disabled = false;
+        sinks.forEach((s)=>{
+          const opt = document.createElement("option");
+          opt.value = s.name;
+          opt.textContent = s.description || s.name;
+          if(airplayState.current && s.name === airplayState.current) opt.selected = true;
+          airplaySelect.append(opt);
+        });
+      }
+      airplayInfo.textContent = airplayState.active
+        ? `Envoi actif • Cible: ${airplayState.current || "—"}`
+        : "Envoi inactif";
+      airplayToggle.textContent = airplayState.active ? "Arrêter envoi" : "Activer envoi";
+      airplayToggle.setAttribute("data-active", airplayState.active ? "true" : "false");
+    } catch {}
+  }
+
+  async function refreshBluetoothTargets(){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/bluetooth/targets`);
+      const body = await res.json();
+      if(!body?.ok) return;
+      btState = body.data || btState;
+      const sinks = btState.sinks || [];
+      btSelect.innerHTML = "";
+      if(!sinks.length){
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "Aucune sortie Bluetooth";
+        btSelect.append(opt);
+        btSelect.disabled = true;
+      } else {
+        btSelect.disabled = false;
+        sinks.forEach((s)=>{
+          const opt = document.createElement("option");
+          opt.value = s.name;
+          opt.textContent = s.description || s.name;
+          if(btState.current && s.name === btState.current) opt.selected = true;
+          btSelect.append(opt);
+        });
+      }
+      btInfo.textContent = btState.active
+        ? `Envoi actif • Cible: ${btState.current || "—"}`
+        : "Envoi inactif";
+      btToggle.textContent = btState.active ? "Arrêter envoi" : "Activer envoi";
+      btToggle.setAttribute("data-active", btState.active ? "true" : "false");
+    } catch {}
+  }
+
+  async function refreshBluetoothDevices(){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/bluetooth/devices`);
+      const body = await res.json();
+      if(!body?.ok) return;
+      btDevices = body.data || [];
+      renderBluetoothDevices();
+    } catch {}
+  }
+
+  function renderBluetoothDevices(){
+    btDevList.innerHTML = "";
+    if(!btDevices.length){
+      btDevList.innerHTML = '<div class="muted">Aucun appareil Bluetooth.</div>';
+      return;
+    }
+    btDevices.forEach((d)=>{
+      const subtitle = d.connected
+        ? "connecté"
+        : (d.paired ? "appairé" : "détecté");
+      const actionBtn = d.connected
+        ? button("Déconnecter", {onClick: async (ev)=>{
+            ev.stopPropagation();
+            await bluetoothDisconnect(d.mac);
+            await refreshBluetoothDevices();
+            await refreshBluetoothTargets();
+          }})
+        : button("Connecter", {onClick: async (ev)=>{
+            ev.stopPropagation();
+            await bluetoothConnect(d.mac);
+            await refreshBluetoothDevices();
+            await refreshBluetoothTargets();
+          }});
+      btDevList.append(listRow({
+        title: d.name || d.mac,
+        subtitle,
+        left: coverEl("sm", d.name || "bt"),
+        right: actionBtn
+      }));
+    });
+  }
+
+  async function scanBluetooth(){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/bluetooth/scan`, {method: "POST"});
+      const body = await res.json();
+      if(body?.ok){
+        toast("Scan Bluetooth lancé");
+      } else {
+        toast(body?.error || "Erreur Bluetooth");
+      }
+    } catch {
+      toast("Erreur Bluetooth");
+    }
+  }
+
+  async function bluetoothConnect(mac){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/bluetooth/connect`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({mac})
+      });
+      const body = await res.json();
+      if(body?.ok){
+        toast("Bluetooth connecté");
+      } else {
+        toast(body?.error || "Erreur Bluetooth");
+      }
+    } catch {
+      toast("Erreur Bluetooth");
+    }
+  }
+
+  async function bluetoothDisconnect(mac){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/bluetooth/disconnect`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({mac})
+      });
+      const body = await res.json();
+      if(body?.ok){
+        toast("Bluetooth déconnecté");
+      } else {
+        toast(body?.error || "Erreur Bluetooth");
+      }
+    } catch {
+      toast("Erreur Bluetooth");
+    }
+  }
+
+  async function setBluetoothTarget(sink){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/bluetooth/target`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({sink})
+      });
+      const body = await res.json();
+      if(body?.ok){
+        toast("Sortie Bluetooth mise à jour");
+      } else {
+        toast(body?.error || "Erreur Bluetooth");
+      }
+    } catch {
+      toast("Erreur Bluetooth");
+    }
+  }
+
+  async function toggleBluetoothSend(enabled){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/bluetooth/send`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({enabled})
+      });
+      const body = await res.json();
+      if(body?.ok){
+        toast(enabled ? "Envoi Bluetooth activé" : "Envoi Bluetooth arrêté");
+      } else {
+        toast(body?.error || "Erreur Bluetooth");
+      }
+    } catch {
+      toast("Erreur Bluetooth");
+    }
+  }
+
+  async function setAirplayTarget(sink){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/airplay/target`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({sink})
+      });
+      const body = await res.json();
+      if(body?.ok){
+        toast("Sortie AirPlay mise à jour");
+      } else {
+        toast(body?.error || "Erreur AirPlay");
+      }
+    } catch {
+      toast("Erreur AirPlay");
+    }
+  }
+
+  async function toggleAirplaySend(enabled){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/airplay/send`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({enabled})
+      });
+      const body = await res.json();
+      if(body?.ok){
+        toast(enabled ? "Envoi AirPlay activé" : "Envoi AirPlay arrêté");
+      } else {
+        toast(body?.error || "Erreur AirPlay");
+      }
+    } catch {
+      toast("Erreur AirPlay");
+    }
   }
 
   async function applyLatency(ms){
@@ -785,6 +1119,9 @@ export async function render(root){
   await refreshDocsStatus();
   await refreshLatency();
   await refreshSnapcastStatus();
+  await refreshAirplayTargets();
+  await refreshBluetoothDevices();
+  await refreshBluetoothTargets();
   cmdLogs = await fetchCmdLogs();
   renderLogs(cmdLogBox, cmdLogPre, cmdLogs, false);
   servicesStatus = await fetchServicesStatus();

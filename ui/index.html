@@ -183,6 +183,9 @@
         <button class="icon-btn" id="btnQueue" aria-label="Ouvrir la file" title="File">
           <svg viewBox="0 0 24 24"><path d="M3 10h14v2H3v-2zm0-4h18v2H3V6zm0 8h10v2H3v-2zm16 0v-2h2v2h-2zm0-8h2v2h-2V6zm0 4h2v2h-2v-2z"/></svg>
         </button>
+        <button class="icon-btn" id="btnOutput" aria-label="Sortie audio" title="Sortie">
+          <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 109 9 9 9 0 00-9-9zm-1 5h2v8h-2zm0 10h2v2h-2z"/></svg>
+        </button>
         <span class="sync-badge" id="queueSyncBadge" title="Synchronisation queue">
           <span class="sync-dot"></span>
           <span class="sync-text">sync</span>
@@ -221,6 +224,14 @@
       <button class="menu__item" id="mnuGoSettings">Paramètres</button>
       <div class="menu__sep"></div>
       <button class="menu__item danger" id="mnuResetDemo">Réinitialiser démo</button>
+    </div>
+
+    <div class="menu" id="menuOutput" hidden>
+      <div class="menu__item muted small">Sortie rapide</div>
+      <button class="menu__item" id="mnuOutputAirplay">AirPlay: —</button>
+      <button class="menu__item" id="mnuOutputBluetooth">Bluetooth: —</button>
+      <div class="menu__sep"></div>
+      <button class="menu__item" id="mnuOutputSettings">Ouvrir paramètres…</button>
     </div>
 
     <!-- Toast -->

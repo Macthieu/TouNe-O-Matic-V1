@@ -883,6 +883,16 @@ input[type="range"]{ accent-color: var(--accent); }
   cursor:pointer;
 }
 .btn:hover{ background: rgba(255,255,255,.07); }
+.btn.is-disabled,
+.icon-btn.is-disabled,
+.fab.is-disabled{
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+input.is-disabled{
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 .btn.is-active{
   border-color: rgba(59,130,246,.5);
   background: rgba(59,130,246,.2);
@@ -966,6 +976,7 @@ input[type="range"]{ accent-color: var(--accent); }
   font: inherit;
 }
 .menu__item:hover{ background: color-mix(in oklab, var(--card2) 85%, transparent); }
+.menu__item.muted{ color: var(--muted); cursor: default; }
 .menu__sep{ height: 1px; background: var(--border); margin: 6px 0; }
 .menu--context{
   min-width: 260px;

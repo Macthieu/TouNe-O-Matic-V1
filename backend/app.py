@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple, Iterable
 import re
 import unicodedata
 import subprocess
+from urllib.parse import urlparse
 
 from flask import Flask, jsonify, request, send_file, make_response
 from PIL import Image
@@ -43,6 +44,15 @@ PHOTO_SOURCES_FILE = DOCS_ROOT / "Photos d'artiste" / "_sources.json"
 SNAPCAST_RPC_URL = os.environ.get("SNAPCAST_RPC_URL", "http://127.0.0.1:1780/jsonrpc")
 SNAPCAST_STATE_FILE = Path(os.environ.get("SNAPCAST_STATE_FILE", "/srv/toune/data/snapcast.json"))
 RADIO_BROWSER_URL = os.environ.get("RADIO_BROWSER_URL", "https://de1.api.radio-browser.info")
+AIRPLAY_ART_DIR = Path(os.environ.get("TOUNE_AIRPLAY_ART_DIR", "/tmp/shairport-sync/.cache/coverart"))
+AIRPLAY_DBUS_NAME = os.environ.get("TOUNE_AIRPLAY_DBUS_NAME", "org.mpris.MediaPlayer2.ShairportSync")
+AIRPLAY_DBUS_PATH = os.environ.get("TOUNE_AIRPLAY_DBUS_PATH", "/org/mpris/MediaPlayer2")
+AIRPLAY_PULSE_SERVER = os.environ.get("TOUNE_AIRPLAY_PULSE_SERVER", "unix:/var/run/pulse/native")
+AIRPLAY_SNAPCLIENT_CONF = Path(os.environ.get("TOUNE_AIRPLAY_SNAPCLIENT_CONF", "/etc/default/snapclient-airplay"))
+AIRPLAY_SNAPCLIENT_SERVICE = os.environ.get("TOUNE_AIRPLAY_SNAPCLIENT_SERVICE", "snapclient-airplay")
+BT_PULSE_SERVER = os.environ.get("TOUNE_BT_PULSE_SERVER", "unix:/var/run/pulse/native")
+BT_SNAPCLIENT_CONF = Path(os.environ.get("TOUNE_BT_SNAPCLIENT_CONF", "/etc/default/snapclient-bluetooth"))
+BT_SNAPCLIENT_SERVICE = os.environ.get("TOUNE_BT_SNAPCLIENT_SERVICE", "snapclient-bluetooth")
 PLAYLIST_PREFIXES = [
     "/mnt/libraries/music/",
     "/mnt/media/wd/Musique/",
@@ -1796,16 +1806,469 @@ def snapcast_stream_set():
 
 @app.post("/api/snapcast/sources/enable")
 def snapcast_sources_enable():
-    script = Path("/srv/toune/repo/toune-o-matic/scripts/enable-snapserver-sources.sh")
+    script = Path("/srv/toune/repo/toune-o-matic/scripts/enable-airplay-snapcast.sh")
     if not script.exists():
         return err("enable script not found", 404)
     try:
-        res = subprocess.run(["/bin/sh", str(script)], capture_output=True, text=True, timeout=20)
+        res = subprocess.run(
+            ["/usr/bin/sudo", "-n", "/bin/sh", str(script)],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env=dict(os.environ, PATH="/usr/sbin:/usr/bin:/sbin:/bin"),
+        )
         if res.returncode != 0:
             return err("enable sources failed", 500, detail=(res.stderr or res.stdout).strip())
         return ok({"result": (res.stdout or "").strip()})
     except Exception as e:
         return err("enable sources failed", 500, detail=str(e))
+
+
+def _busctl_json(args: List[str]) -> Dict[str, Any]:
+    res = subprocess.run(
+        ["/usr/bin/busctl", "--system", "--json=short"] + args,
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+    if res.returncode != 0:
+        raise RuntimeError((res.stderr or res.stdout or "").strip())
+    return json.loads(res.stdout or "{}")
+
+
+def _airplay_get_property(prop: str) -> Dict[str, Any]:
+    return _busctl_json(
+        [
+            "get-property",
+            AIRPLAY_DBUS_NAME,
+            AIRPLAY_DBUS_PATH,
+            "org.mpris.MediaPlayer2.Player",
+            prop,
+        ]
+    )
+
+
+def _airplay_parse_value(val: Any) -> Optional[str]:
+    if not isinstance(val, dict):
+        return None
+    data = val.get("data")
+    if data is None:
+        return None
+    if val.get("type") == "as" and isinstance(data, list):
+        return ", ".join([str(x) for x in data if x is not None])
+    return str(data)
+
+
+def _airplay_art_url(raw_url: Optional[str]) -> str:
+    if not raw_url:
+        return ""
+    if raw_url.startswith("file://"):
+        path = Path(urlparse(raw_url).path)
+        try:
+            path = path.resolve()
+        except Exception:
+            return ""
+        if AIRPLAY_ART_DIR in path.parents and path.is_file():
+            return f"/api/airplay/art?name={path.name}"
+        return ""
+    return raw_url
+
+
+@app.get("/api/airplay/status")
+def airplay_status():
+    try:
+        status_payload = _airplay_get_property("PlaybackStatus")
+        meta_payload = _airplay_get_property("Metadata")
+        status = str(status_payload.get("data") or "Stopped")
+        raw_meta = meta_payload.get("data") or {}
+        title = _airplay_parse_value(raw_meta.get("xesam:title"))
+        artist = _airplay_parse_value(raw_meta.get("xesam:artist"))
+        album = _airplay_parse_value(raw_meta.get("xesam:album"))
+        art_raw = _airplay_parse_value(raw_meta.get("mpris:artUrl"))
+        art = _airplay_art_url(art_raw)
+        return ok(
+            {
+                "active": status != "Stopped",
+                "status": status,
+                "title": title or "",
+                "artist": artist or "",
+                "album": album or "",
+                "art": art,
+                "art_raw": art_raw or "",
+                "source": "airplay",
+            }
+        )
+    except Exception as e:
+        return ok({"active": False, "status": "Unavailable", "error": str(e)})
+
+
+@app.get("/api/airplay/art")
+def airplay_art():
+    name = (request.args.get("name") or "").strip()
+    if not name or "/" in name or "\\" in name or ".." in name:
+        return err("invalid art name", 400)
+    path = (AIRPLAY_ART_DIR / name).resolve()
+    if AIRPLAY_ART_DIR not in path.parents or not path.exists():
+        return err("art not found", 404)
+    return send_file(path)
+
+
+def _pactl(args: List[str]) -> str:
+    res = subprocess.run(
+        ["/usr/bin/pactl", "-s", AIRPLAY_PULSE_SERVER] + args,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    if res.returncode != 0:
+        raise RuntimeError((res.stderr or res.stdout or "").strip())
+    return res.stdout or ""
+
+
+def _pactl_bt(args: List[str]) -> str:
+    res = subprocess.run(
+        ["/usr/bin/pactl", "-s", BT_PULSE_SERVER] + args,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    if res.returncode != 0:
+        raise RuntimeError((res.stderr or res.stdout or "").strip())
+    return res.stdout or ""
+
+
+def _pactl_sink_descriptions() -> Dict[str, str]:
+    desc: Dict[str, str] = {}
+    current = None
+    try:
+        raw = _pactl(["list", "sinks"])
+    except Exception:
+        return desc
+    for line in raw.splitlines():
+        s = line.strip()
+        if s.startswith("Name:"):
+            current = s.split(":", 1)[1].strip()
+            continue
+        if s.startswith("Description:") and current:
+            desc[current] = s.split(":", 1)[1].strip()
+    return desc
+
+
+def _pactl_list_sinks() -> List[Dict[str, str]]:
+    desc = _pactl_sink_descriptions()
+    out: List[Dict[str, str]] = []
+    raw = _pactl(["list", "short", "sinks"])
+    for line in raw.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        name = parts[1].strip()
+        if not name.startswith("raop_output."):
+            continue
+        out.append({"name": name, "description": desc.get(name, name)})
+    return out
+
+
+def _pactl_bt_sink_descriptions() -> Dict[str, str]:
+    desc: Dict[str, str] = {}
+    current = None
+    try:
+        raw = _pactl_bt(["list", "sinks"])
+    except Exception:
+        return desc
+    for line in raw.splitlines():
+        s = line.strip()
+        if s.startswith("Name:"):
+            current = s.split(":", 1)[1].strip()
+            continue
+        if s.startswith("Description:") and current:
+            desc[current] = s.split(":", 1)[1].strip()
+    return desc
+
+
+def _pactl_list_bt_sinks() -> List[Dict[str, str]]:
+    desc = _pactl_bt_sink_descriptions()
+    out: List[Dict[str, str]] = []
+    raw = _pactl_bt(["list", "short", "sinks"])
+    for line in raw.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        name = parts[1].strip()
+        if not name.startswith("bluez_sink."):
+            continue
+        out.append({"name": name, "description": desc.get(name, name)})
+    return out
+
+
+def _read_bt_sink() -> str:
+    if not BT_SNAPCLIENT_CONF.exists():
+        return ""
+    for line in BT_SNAPCLIENT_CONF.read_text().splitlines():
+        if line.startswith("PULSE_SINK="):
+            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
+def _read_airplay_sink() -> str:
+    if not AIRPLAY_SNAPCLIENT_CONF.exists():
+        return ""
+    for line in AIRPLAY_SNAPCLIENT_CONF.read_text().splitlines():
+        if line.startswith("PULSE_SINK="):
+            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
+def _service_active(name: str) -> bool:
+    res = subprocess.run(
+        ["/usr/bin/systemctl", "is-active", name],
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+    return (res.stdout or "").strip() == "active"
+
+
+@app.get("/api/airplay/targets")
+def airplay_targets():
+    try:
+        sinks = _pactl_list_sinks()
+        current = _read_airplay_sink()
+        return ok({"sinks": sinks, "current": current, "active": _service_active(AIRPLAY_SNAPCLIENT_SERVICE)})
+    except Exception as e:
+        return err("airplay targets failed", 500, detail=str(e))
+
+
+@app.post("/api/airplay/target")
+def airplay_target_set():
+    data = request.get_json(silent=True) or {}
+    sink = (data.get("sink") or "").strip()
+    if not sink:
+        return err("missing sink")
+    script = Path("/srv/toune/repo/toune-o-matic/scripts/set-airplay-target.sh")
+    if not script.exists():
+        return err("set target script not found", 404)
+    try:
+        res = subprocess.run(
+            ["/usr/bin/sudo", "-n", "/bin/sh", str(script), sink],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=dict(os.environ, PATH="/usr/sbin:/usr/bin:/sbin:/bin"),
+        )
+        if res.returncode != 0:
+            return err("airplay target update failed", 500, detail=(res.stderr or res.stdout).strip())
+        return ok({"sink": sink})
+    except Exception as e:
+        return err("airplay target update failed", 500, detail=str(e))
+
+
+@app.post("/api/airplay/send")
+def airplay_send_toggle():
+    data = request.get_json(silent=True) or {}
+    enabled = bool(data.get("enabled"))
+    action = "start" if enabled else "stop"
+    try:
+        res = subprocess.run(
+            ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", action, AIRPLAY_SNAPCLIENT_SERVICE],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if res.returncode != 0:
+            return err("airplay send update failed", 500, detail=(res.stderr or res.stdout).strip())
+        return ok({"active": _service_active(AIRPLAY_SNAPCLIENT_SERVICE)})
+    except Exception as e:
+        return err("airplay send update failed", 500, detail=str(e))
+
+
+def _btctl(args: List[str], timeout_s: int = 10) -> str:
+    res = subprocess.run(
+        ["/usr/bin/sudo", "-n", "/usr/bin/bluetoothctl"] + args,
+        capture_output=True,
+        text=True,
+        timeout=timeout_s,
+    )
+    if res.returncode != 0:
+        raise RuntimeError((res.stderr or res.stdout or "").strip())
+    return res.stdout or ""
+
+
+def _bt_ready():
+    subprocess.run(
+        ["/usr/bin/sudo", "-n", "/usr/sbin/rfkill", "unblock", "bluetooth"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    _btctl(["power", "on"], timeout_s=5)
+    try:
+        _btctl(["agent", "on"], timeout_s=5)
+        _btctl(["default-agent"], timeout_s=5)
+    except Exception:
+        pass
+    try:
+        _btctl(["pairable", "on"], timeout_s=5)
+        _btctl(["discoverable", "on"], timeout_s=5)
+    except Exception:
+        pass
+
+
+def _parse_bt_devices(raw: str) -> List[Dict[str, str]]:
+    devices = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("Device "):
+            continue
+        parts = line.split(" ", 2)
+        if len(parts) < 3:
+            continue
+        devices.append({"mac": parts[1], "name": parts[2]})
+    return devices
+
+
+def _bt_info(mac: str) -> Dict[str, Any]:
+    info = {"paired": False, "trusted": False, "connected": False}
+    raw = _btctl(["info", mac], timeout_s=5)
+    for line in raw.splitlines():
+        s = line.strip()
+        if s.startswith("Paired:"):
+            info["paired"] = s.split(":", 1)[1].strip().lower() == "yes"
+        elif s.startswith("Trusted:"):
+            info["trusted"] = s.split(":", 1)[1].strip().lower() == "yes"
+        elif s.startswith("Connected:"):
+            info["connected"] = s.split(":", 1)[1].strip().lower() == "yes"
+        elif s.startswith("Name:"):
+            info["name"] = s.split(":", 1)[1].strip()
+    return info
+
+
+@app.post("/api/bluetooth/scan")
+def bluetooth_scan():
+    try:
+        _bt_ready()
+        subprocess.run(
+            ["/usr/bin/sudo", "-n", "/usr/bin/bluetoothctl", "--timeout", "8", "scan", "on"],
+            capture_output=True,
+            text=True,
+            timeout=12,
+        )
+        return ok({"scanned": True})
+    except Exception as e:
+        return err("bluetooth scan failed", 500, detail=str(e))
+
+
+@app.get("/api/bluetooth/devices")
+def bluetooth_devices():
+    try:
+        raw = _btctl(["devices"], timeout_s=5)
+        devices = _parse_bt_devices(raw)
+        out = []
+        for d in devices:
+            info = _bt_info(d["mac"])
+            out.append({
+                "mac": d["mac"],
+                "name": info.get("name") or d.get("name") or d["mac"],
+                "paired": info.get("paired", False),
+                "trusted": info.get("trusted", False),
+                "connected": info.get("connected", False),
+            })
+        return ok(out)
+    except Exception as e:
+        return err("bluetooth devices failed", 500, detail=str(e))
+
+
+@app.post("/api/bluetooth/connect")
+def bluetooth_connect():
+    data = request.get_json(silent=True) or {}
+    mac = (data.get("mac") or "").strip()
+    if not mac:
+        return err("missing mac")
+    try:
+        _bt_ready()
+        try:
+            _btctl(["scan", "off"], timeout_s=5)
+        except Exception:
+            pass
+        try:
+            _btctl(["remove", mac], timeout_s=5)
+            time.sleep(1)
+        except Exception:
+            pass
+        _btctl(["pair", mac], timeout_s=15)
+        _btctl(["trust", mac], timeout_s=5)
+        _btctl(["connect", mac], timeout_s=10)
+        info = _bt_info(mac)
+        return ok({"mac": mac, **info})
+    except Exception as e:
+        return err("bluetooth connect failed", 500, detail=str(e))
+
+
+@app.post("/api/bluetooth/disconnect")
+def bluetooth_disconnect():
+    data = request.get_json(silent=True) or {}
+    mac = (data.get("mac") or "").strip()
+    if not mac:
+        return err("missing mac")
+    try:
+        _btctl(["disconnect", mac], timeout_s=8)
+        info = _bt_info(mac)
+        return ok({"mac": mac, **info})
+    except Exception as e:
+        return err("bluetooth disconnect failed", 500, detail=str(e))
+
+
+@app.get("/api/bluetooth/targets")
+def bluetooth_targets():
+    try:
+        sinks = _pactl_list_bt_sinks()
+        current = _read_bt_sink()
+        return ok({"sinks": sinks, "current": current, "active": _service_active(BT_SNAPCLIENT_SERVICE)})
+    except Exception as e:
+        return err("bluetooth targets failed", 500, detail=str(e))
+
+
+@app.post("/api/bluetooth/target")
+def bluetooth_target_set():
+    data = request.get_json(silent=True) or {}
+    sink = (data.get("sink") or "").strip()
+    if not sink:
+        return err("missing sink")
+    script = Path("/srv/toune/repo/toune-o-matic/scripts/set-bluetooth-target.sh")
+    if not script.exists():
+        return err("set target script not found", 404)
+    try:
+        res = subprocess.run(
+            ["/usr/bin/sudo", "-n", "/bin/sh", str(script), sink],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=dict(os.environ, PATH="/usr/sbin:/usr/bin:/sbin:/bin"),
+        )
+        if res.returncode != 0:
+            return err("bluetooth target update failed", 500, detail=(res.stderr or res.stdout).strip())
+        return ok({"sink": sink})
+    except Exception as e:
+        return err("bluetooth target update failed", 500, detail=str(e))
+
+
+@app.post("/api/bluetooth/send")
+def bluetooth_send_toggle():
+    data = request.get_json(silent=True) or {}
+    enabled = bool(data.get("enabled"))
+    action = "start" if enabled else "stop"
+    try:
+        res = subprocess.run(
+            ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", action, BT_SNAPCLIENT_SERVICE],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if res.returncode != 0:
+            return err("bluetooth send update failed", 500, detail=(res.stderr or res.stdout).strip())
+        return ok({"active": _service_active(BT_SNAPCLIENT_SERVICE)})
+    except Exception as e:
+        return err("bluetooth send update failed", 500, detail=str(e))
 
 
 @app.post("/api/library/queue/random-next")

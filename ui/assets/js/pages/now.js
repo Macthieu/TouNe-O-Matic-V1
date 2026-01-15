@@ -24,30 +24,20 @@ export async function render(root){
   wrap.style.alignItems = "start";
 
   const cover = coverEl("lg", tr?.title || "Couverture");
-  const art = albumArtUrl(tr, 420);
-  if(art){
-    cover.style.backgroundImage = `url("${art}")`;
-    cover.style.backgroundSize = "cover";
-    cover.style.backgroundPosition = "center";
-  }
   cover.style.marginTop = "6px";
 
-  const favs = st.library.favourites || [];
-  const isFav = tr?.path ? favs.some(f=>f.key === `track:${tr.path}`) : false;
   const meta = document.createElement("div");
   meta.innerHTML = `
-    <div class="h1">${tr ? tr.title : "—"}</div>
-    <div class="muted">${tr ? tr.artist : "—"} • ${tr ? tr.album : "—"}</div>
-    <div style="margin-top:10px" class="muted small">
-      ${tr ? `Piste ${tr.trackNo} • ${formatTime(tr.duration)} • ${tr.year}` : ""}
-    </div>
+    <div class="h1" id="npTitle">—</div>
+    <div class="muted" id="npSubtitle">—</div>
+    <div style="margin-top:10px" class="muted small" id="npDetail">—</div>
     <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px">
       <button class="btn primary" id="npPlay">${st.player.state === "play" ? "Pause" : "Lecture"}</button>
       <button class="btn" id="npNext">Suivant</button>
       <button class="btn" id="npMix">Mix</button>
       <button class="btn" id="npRandomNext">Suivant aléatoire</button>
       <button class="btn" id="npAdd">Ajouter à une playlist</button>
-      <button class="btn" id="npFav">${isFav ? "Retirer des favoris" : "Ajouter aux favoris"}</button>
+      <button class="btn" id="npFav">Ajouter aux favoris</button>
     </div>
   `;
 
@@ -101,14 +91,94 @@ export async function render(root){
       mixBtn.classList.toggle("is-active", !!next.player.random);
     });
   }
-  c.root.querySelector("#npAdd")?.addEventListener("click", (ev)=>{
-    if(!tr?.path) return;
-    showAddMenu(ev.currentTarget, {title: tr.title, paths: [tr.path]});
+  const titleEl = meta.querySelector("#npTitle");
+  const subtitleEl = meta.querySelector("#npSubtitle");
+  const detailEl = meta.querySelector("#npDetail");
+  const favBtn = meta.querySelector("#npFav");
+  const addBtn = meta.querySelector("#npAdd");
+  const lockIds = ["npPlay", "npNext", "npMix", "npRandomNext"];
+
+  function applyState(state){
+    const track = state.player.track;
+    const ap = state.airplay || {};
+    const airplayActive = !!ap.active;
+    const displayTitle = airplayActive ? (ap.title || "AirPlay") : (track?.title || "—");
+    const displayArtist = airplayActive ? (ap.artist || "") : (track?.artist || "—");
+    const displayAlbum = airplayActive ? (ap.album || "") : (track?.album || "—");
+
+    if(titleEl) titleEl.textContent = displayTitle;
+    if(subtitleEl){
+      subtitleEl.textContent = displayAlbum
+        ? `${displayArtist || "—"} • ${displayAlbum}`
+        : (displayArtist || "—");
+    }
+    if(detailEl){
+      detailEl.textContent = airplayActive
+        ? "Source externe (AirPlay) • Contrôle via l’app source"
+        : (track ? `Piste ${track.trackNo} • ${formatTime(track.duration)} • ${track.year}` : "—");
+    }
+
+    const art = airplayActive ? airplayArtUrl(ap) : albumArtUrl(track, 420);
+    if(art){
+      cover.style.backgroundImage = `url("${art}")`;
+      cover.style.backgroundSize = "cover";
+      cover.style.backgroundPosition = "center";
+    } else {
+      cover.style.backgroundImage = "";
+    }
+
+    if(addBtn){
+      if(airplayActive || !track?.path){
+        addBtn.setAttribute("disabled", "disabled");
+        addBtn.classList.add("is-disabled");
+      } else {
+        addBtn.removeAttribute("disabled");
+        addBtn.classList.remove("is-disabled");
+      }
+    }
+
+    if(favBtn){
+      const favs = state.library.favourites || [];
+      const isFav = track?.path ? favs.some(f=>f.key === `track:${track.path}`) : false;
+      favBtn.textContent = isFav ? "Retirer des favoris" : "Ajouter aux favoris";
+      if(airplayActive || !track?.path){
+        favBtn.setAttribute("disabled", "disabled");
+        favBtn.classList.add("is-disabled");
+      } else {
+        favBtn.removeAttribute("disabled");
+        favBtn.classList.remove("is-disabled");
+      }
+    }
+
+    for(const id of lockIds){
+      const btn = c.root.querySelector(`#${id}`);
+      if(!btn) continue;
+      if(airplayActive){
+        btn.setAttribute("disabled", "disabled");
+        btn.classList.add("is-disabled");
+        btn.title = "Lecture via AirPlay — contrôle depuis l’app source";
+      } else {
+        btn.removeAttribute("disabled");
+        btn.classList.remove("is-disabled");
+        btn.title = "";
+      }
+    }
+  }
+
+  addBtn?.addEventListener("click", (ev)=>{
+    const track = store.get().player.track;
+    if(!track?.path) return;
+    showAddMenu(ev.currentTarget, {title: track.title, paths: [track.path]});
   });
-  c.root.querySelector("#npFav")?.addEventListener("click", async ()=>{
-    await toggleTrackFavourite(tr);
+  favBtn?.addEventListener("click", async ()=>{
+    const track = store.get().player.track;
+    if(!track?.path) return;
+    await toggleTrackFavourite(track);
     await fetchFavourites();
   });
+
+  applyState(store.get());
+  store.subscribe(applyState);
 }
 
 function albumArtUrl(track, size){
@@ -118,4 +188,13 @@ function albumArtUrl(track, size){
   url.searchParams.set("album", track.album);
   if(size) url.searchParams.set("size", String(size));
   return url.toString();
+}
+
+function airplayArtUrl(ap){
+  if(!ap?.art) return "";
+  try {
+    return new URL(ap.art, window.location.origin).toString();
+  } catch {
+    return "";
+  }
 }

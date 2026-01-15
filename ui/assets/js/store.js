@@ -37,7 +37,16 @@ export const store = (() => {
       radios: [],
       favourites: [],
       apps: [],
-    }
+    },
+    airplay: {
+      active: false,
+      status: "Stopped",
+      title: "",
+      artist: "",
+      album: "",
+      art: "",
+      source: "airplay",
+    },
   };
 
   const subs = new Set();
