@@ -1118,15 +1118,26 @@ def _scan_library_worker():
     SCAN_STATE["log"] = []
     _log_event(SCAN_STATE, "info", "Scan démarré")
     try:
-        with mpd_client() as c:
+        items = None
+        for attempt in range(2):
             try:
-                c.update()
-                _log_event(SCAN_STATE, "info", "MPD update lancé")
-            except Exception:
-                pass
-            _wait_mpd_update(c, timeout_s=300)
-            SCAN_STATE["phase"] = "indexing"
-            items = c.listallinfo()
+                with mpd_client() as c:
+                    try:
+                        c.update()
+                        _log_event(SCAN_STATE, "info", "MPD update lancé")
+                    except Exception:
+                        pass
+                    _wait_mpd_update(c, timeout_s=300)
+                    SCAN_STATE["phase"] = "indexing"
+                    items = c.listallinfo()
+                break
+            except Exception as e:
+                if attempt == 0:
+                    time.sleep(1)
+                    continue
+                raise e
+        if items is None:
+            items = []
         files = [i for i in items if "file" in i]
         SCAN_STATE["total"] = len(files)
 
@@ -2001,6 +2012,10 @@ def _pactl_list_bt_sinks() -> List[Dict[str, str]]:
     return out
 
 
+def _bt_mac_to_sink(mac: str) -> str:
+    return f"bluez_sink.{mac.replace(':', '_')}.a2dp_sink"
+
+
 def _read_bt_sink() -> str:
     if not BT_SNAPCLIENT_CONF.exists():
         return ""
@@ -2008,6 +2023,55 @@ def _read_bt_sink() -> str:
         if line.startswith("PULSE_SINK="):
             return line.split("=", 1)[1].strip().strip('"').strip("'")
     return ""
+
+
+def _read_bt_conf() -> Dict[str, str]:
+    if not BT_SNAPCLIENT_CONF.exists():
+        return {}
+    raw = BT_SNAPCLIENT_CONF.read_text()
+    raw = raw.replace("\\n", "\n")
+    out: Dict[str, str] = {}
+    for line in raw.splitlines():
+        if not line or line.lstrip().startswith("#"):
+            continue
+        key, sep, val = line.partition("=")
+        if not sep:
+            continue
+        out[key.strip()] = val.strip()
+    return out
+
+
+def _write_bt_conf(updates: Dict[str, str]) -> Dict[str, str]:
+    data = _read_bt_conf()
+    data.update({k: str(v) for k, v in updates.items() if v is not None})
+    if "PULSE_SERVER" not in data:
+        data["PULSE_SERVER"] = "unix:/var/run/pulse/native"
+    if "SNAPCLIENT_BLUETOOTH_STREAM" not in data:
+        data["SNAPCLIENT_BLUETOOTH_STREAM"] = "mpd"
+    if "SNAPCLIENT_BLUETOOTH_LATENCY" not in data:
+        data["SNAPCLIENT_BLUETOOTH_LATENCY"] = "0"
+    order = [
+        "PULSE_SERVER",
+        "PULSE_SINK",
+        "SNAPCLIENT_BLUETOOTH_STREAM",
+        "SNAPCLIENT_BLUETOOTH_LATENCY",
+    ]
+    lines = []
+    for key in order:
+        if key in data:
+            lines.append(f"{key}={data[key]}")
+    for key in sorted(k for k in data.keys() if k not in order):
+        lines.append(f"{key}={data[key]}")
+    BT_SNAPCLIENT_CONF.write_text("\n".join(lines) + "\n")
+    return data
+
+
+def _read_bt_latency() -> int:
+    data = _read_bt_conf()
+    try:
+        return int(data.get("SNAPCLIENT_BLUETOOTH_LATENCY", "0"))
+    except Exception:
+        return 0
 
 
 def _read_airplay_sink() -> str:
@@ -2094,6 +2158,18 @@ def _btctl(args: List[str], timeout_s: int = 10) -> str:
     return res.stdout or ""
 
 
+def _btctl_agent(args: List[str], timeout_s: int = 20) -> str:
+    res = subprocess.run(
+        ["/usr/bin/sudo", "-n", "/usr/bin/bluetoothctl"] + args,
+        capture_output=True,
+        text=True,
+        timeout=timeout_s,
+    )
+    if res.returncode != 0:
+        raise RuntimeError((res.stderr or res.stdout or "").strip())
+    return res.stdout or ""
+
+
 def _bt_ready():
     subprocess.run(
         ["/usr/bin/sudo", "-n", "/usr/sbin/rfkill", "unblock", "bluetooth"],
@@ -2109,7 +2185,6 @@ def _bt_ready():
         pass
     try:
         _btctl(["pairable", "on"], timeout_s=5)
-        _btctl(["discoverable", "on"], timeout_s=5)
     except Exception:
         pass
 
@@ -2127,9 +2202,57 @@ def _parse_bt_devices(raw: str) -> List[Dict[str, str]]:
     return devices
 
 
+def _bt_devices() -> List[Dict[str, str]]:
+    raw = _btctl(["devices"], timeout_s=8)
+    return _parse_bt_devices(raw)
+
+
+def _bt_find_device(mac: str, name: str = "") -> str:
+    def _match(devs: List[Dict[str, str]]) -> Optional[str]:
+        if mac:
+            for d in devs:
+                if d.get("mac") == mac:
+                    return mac
+        if name:
+            # Prefer classic (non-LE) device names for A2DP.
+            matches = []
+            for d in devs:
+                dname = (d.get("name") or "")
+                if name.lower() in dname.lower():
+                    matches.append(d)
+            if matches:
+                for d in matches:
+                    if not (d.get("name") or "").lower().startswith("le-"):
+                        return d.get("mac")
+                return matches[0].get("mac")
+        return None
+
+    devs = _bt_devices()
+    found = _match(devs)
+    if found:
+        return found
+    try:
+        subprocess.run(
+            ["/usr/bin/sudo", "-n", "/usr/bin/bluetoothctl", "--timeout", "6", "scan", "on"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        pass
+    devs = _bt_devices()
+    found = _match(devs)
+    if not found:
+        raise RuntimeError("Device not available")
+    return found
+
+
 def _bt_info(mac: str) -> Dict[str, Any]:
     info = {"paired": False, "trusted": False, "connected": False}
-    raw = _btctl(["info", mac], timeout_s=5)
+    try:
+        raw = _btctl(["info", mac], timeout_s=5)
+    except Exception:
+        return info
     for line in raw.splitlines():
         s = line.strip()
         if s.startswith("Paired:"):
@@ -2146,14 +2269,22 @@ def _bt_info(mac: str) -> Dict[str, Any]:
 @app.post("/api/bluetooth/scan")
 def bluetooth_scan():
     try:
-        _bt_ready()
-        subprocess.run(
-            ["/usr/bin/sudo", "-n", "/usr/bin/bluetoothctl", "--timeout", "8", "scan", "on"],
-            capture_output=True,
-            text=True,
-            timeout=12,
-        )
-        return ok({"scanned": True})
+        def _scan():
+            try:
+                _bt_ready()
+                # quick refresh of known devices
+                _btctl(["devices"], timeout_s=3)
+                subprocess.run(
+                    ["/usr/bin/sudo", "-n", "/usr/bin/bluetoothctl", "--timeout", "12", "scan", "on"],
+                    capture_output=True,
+                    text=True,
+                    timeout=16,
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_scan, daemon=True).start()
+        return ok({"scanned": True, "started": True})
     except Exception as e:
         return err("bluetooth scan failed", 500, detail=str(e))
 
@@ -2178,28 +2309,104 @@ def bluetooth_devices():
         return err("bluetooth devices failed", 500, detail=str(e))
 
 
+def _do_bluetooth_connect(mac: str, name: str = "") -> Dict[str, Any]:
+    _bt_ready()
+    try:
+        _btctl(["scan", "off"], timeout_s=5)
+    except Exception:
+        pass
+    mac = _bt_find_device(mac, name)
+    info = _bt_info(mac)
+    if info.get("paired"):
+        last_err = ""
+        try:
+            _btctl_agent(["connect", mac], timeout_s=15)
+        except Exception as e:
+            last_err = str(e)
+            try:
+                _btctl(["disconnect", mac], timeout_s=5)
+            except Exception:
+                pass
+            try:
+                _btctl_agent(["connect", mac], timeout_s=15)
+            except Exception as e2:
+                last_err = str(e2) or last_err
+        info = _bt_info(mac)
+        if not info.get("connected"):
+            raise RuntimeError(last_err or "connect failed")
+        info = {"mac": mac, **info}
+    else:
+        def _try_pair(target_mac: str):
+            try:
+                _btctl_agent(["pair", target_mac], timeout_s=15)
+            except Exception:
+                # retry once after cancel
+                try:
+                    _btctl(["cancel-pairing"], timeout_s=5)
+                except Exception:
+                    pass
+                _btctl_agent(["pair", target_mac], timeout_s=15)
+
+        try:
+            _try_pair(mac)
+        except Exception as e:
+            # If the device rotated its address, try to resolve by name.
+            if name:
+                mac = _bt_find_device(mac, name)
+                _try_pair(mac)
+            else:
+                raise e
+        _btctl(["trust", mac], timeout_s=5)
+        _btctl_agent(["connect", mac], timeout_s=8)
+        info = {"mac": mac, **_bt_info(mac)}
+    try:
+        sink = _bt_mac_to_sink(mac)
+        sinks = {s["name"] for s in _pactl_list_bt_sinks()}
+        if sink in sinks:
+            script = Path("/srv/toune/repo/toune-o-matic/scripts/set-bluetooth-target.sh")
+            subprocess.run(
+                ["/usr/bin/sudo", "-n", str(script), sink],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            info["sink"] = sink
+            info["sink_set"] = True
+            subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", BT_SNAPCLIENT_SERVICE],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            info["send_active"] = True
+        else:
+            info["sink"] = sink
+            info["sink_set"] = False
+    except Exception:
+        info["sink_set"] = False
+    return info
+
+
 @app.post("/api/bluetooth/connect")
 def bluetooth_connect():
     data = request.get_json(silent=True) or {}
     mac = (data.get("mac") or "").strip()
+    name = (data.get("name") or "").strip()
+    # Default to async to avoid blocking on flaky bluetoothctl connects.
+    is_async = not bool(data.get("sync"))
     if not mac:
         return err("missing mac")
     try:
-        _bt_ready()
-        try:
-            _btctl(["scan", "off"], timeout_s=5)
-        except Exception:
-            pass
-        try:
-            _btctl(["remove", mac], timeout_s=5)
-            time.sleep(1)
-        except Exception:
-            pass
-        _btctl(["pair", mac], timeout_s=15)
-        _btctl(["trust", mac], timeout_s=5)
-        _btctl(["connect", mac], timeout_s=10)
-        info = _bt_info(mac)
-        return ok({"mac": mac, **info})
+        if is_async:
+            def _run():
+                try:
+                    _do_bluetooth_connect(mac, name)
+                except Exception:
+                    pass
+            threading.Thread(target=_run, daemon=True).start()
+            return ok({"mac": mac, "started": True})
+        result = _do_bluetooth_connect(mac, name)
+        return ok(result)
     except Exception as e:
         return err("bluetooth connect failed", 500, detail=str(e))
 
@@ -2223,7 +2430,12 @@ def bluetooth_targets():
     try:
         sinks = _pactl_list_bt_sinks()
         current = _read_bt_sink()
-        return ok({"sinks": sinks, "current": current, "active": _service_active(BT_SNAPCLIENT_SERVICE)})
+        return ok({
+            "sinks": sinks,
+            "current": current,
+            "active": _service_active(BT_SNAPCLIENT_SERVICE),
+            "latency_ms": _read_bt_latency(),
+        })
     except Exception as e:
         return err("bluetooth targets failed", 500, detail=str(e))
 
@@ -2269,6 +2481,197 @@ def bluetooth_send_toggle():
         return ok({"active": _service_active(BT_SNAPCLIENT_SERVICE)})
     except Exception as e:
         return err("bluetooth send update failed", 500, detail=str(e))
+
+
+@app.get("/api/bluetooth/latency")
+def bluetooth_latency():
+    try:
+        return ok({"latency_ms": _read_bt_latency()})
+    except Exception as e:
+        return err("bluetooth latency failed", 500, detail=str(e))
+
+
+@app.post("/api/bluetooth/latency")
+def bluetooth_latency_set():
+    data = request.get_json(silent=True) or {}
+    try:
+        latency_ms = int(data.get("latency_ms", 0))
+    except Exception:
+        return err("invalid latency")
+    if latency_ms < 0 or latency_ms > 5000:
+        return err("invalid latency")
+    try:
+        _write_bt_conf({"SNAPCLIENT_BLUETOOTH_LATENCY": str(latency_ms)})
+        subprocess.run(
+            ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "restart", BT_SNAPCLIENT_SERVICE],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return ok({"latency_ms": latency_ms})
+    except Exception as e:
+        return err("bluetooth latency update failed", 500, detail=str(e))
+
+
+@app.post("/api/bluetooth/reset")
+def bluetooth_reset():
+    try:
+        subprocess.run(
+            ["/usr/bin/sudo", "-n", "/usr/sbin/rfkill", "unblock", "bluetooth"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if shutil.which("btmgmt"):
+            subprocess.run([ "/usr/bin/sudo", "-n", "btmgmt", "power", "off" ], capture_output=True, text=True, timeout=5)
+            subprocess.run([ "/usr/bin/sudo", "-n", "btmgmt", "power", "on" ], capture_output=True, text=True, timeout=5)
+        elif shutil.which("hciconfig"):
+            subprocess.run([ "/usr/bin/sudo", "-n", "hciconfig", "hci0", "reset" ], capture_output=True, text=True, timeout=5)
+        subprocess.run(
+            ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "restart", "bluetooth"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return ok({"reset": True})
+    except Exception as e:
+        return err("bluetooth reset failed", 500, detail=str(e))
+
+
+def _bluealsa_pcms() -> List[str]:
+    try:
+        res = subprocess.run(
+            ["/usr/bin/bluealsa-cli", "list-pcms"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if res.returncode != 0:
+            return []
+        return [ln.strip() for ln in (res.stdout or "").splitlines() if ln.strip()]
+    except Exception:
+        return []
+
+
+@app.get("/api/bluetooth/status")
+def bluetooth_status():
+    try:
+        return ok({
+            "monitor_active": _service_active(os.environ.get("TOUNE_BT_MONITOR_SERVICE", "toune-bt-a2dp-monitor")),
+            "bluealsa_active": _service_active("bluealsa"),
+            "pcms": _bluealsa_pcms(),
+        })
+    except Exception as e:
+        return err("bluetooth status failed", 500, detail=str(e))
+
+
+@app.post("/api/bluetooth/pair")
+def bluetooth_pair():
+    data = request.get_json(silent=True) or {}
+    mac = (data.get("mac") or "").strip()
+    name = (data.get("name") or "").strip()
+    is_async = not bool(data.get("sync"))
+    if not mac and not name:
+        return err("missing mac")
+    try:
+        def _run():
+            try:
+                _bt_ready()
+                if mac:
+                    try:
+                        _btctl(["remove", mac], timeout_s=5)
+                    except Exception:
+                        pass
+                _btctl(["scan", "on"], timeout_s=8)
+                found = _bt_find_device(mac, name)
+                _btctl_agent(["pair", found], timeout_s=20)
+                _btctl(["trust", found], timeout_s=5)
+                _btctl_agent(["connect", found], timeout_s=15)
+            except Exception:
+                pass
+
+        if is_async:
+            threading.Thread(target=_run, daemon=True).start()
+            return ok({"started": True, "mac": mac or "", "name": name})
+        _run()
+        return ok({"started": False, "mac": mac or "", "name": name})
+    except Exception as e:
+        return err("bluetooth pair failed", 500, detail=str(e))
+
+
+@app.post("/api/output/select")
+def output_select():
+    data = request.get_json(silent=True) or {}
+    kind = (data.get("type") or "").strip().lower()
+    target = (data.get("target") or "").strip()
+    try:
+        if kind == "local":
+            subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", AIRPLAY_SNAPCLIENT_SERVICE],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", BT_SNAPCLIENT_SERVICE],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return ok({"active": "local"})
+        if kind == "airplay":
+            if not target:
+                return err("missing target")
+            script = Path("/srv/toune/repo/toune-o-matic/scripts/set-airplay-target.sh")
+            res = subprocess.run(
+                ["/usr/bin/sudo", "-n", str(script), target],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if res.returncode != 0:
+                return err("airplay target update failed", 500, detail=(res.stderr or res.stdout).strip())
+            subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", BT_SNAPCLIENT_SERVICE],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", AIRPLAY_SNAPCLIENT_SERVICE],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return ok({"active": "airplay", "target": target})
+        if kind == "bluetooth":
+            if not target:
+                return err("missing target")
+            script = Path("/srv/toune/repo/toune-o-matic/scripts/set-bluetooth-target.sh")
+            res = subprocess.run(
+                ["/usr/bin/sudo", "-n", str(script), target],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if res.returncode != 0:
+                return err("bluetooth target update failed", 500, detail=(res.stderr or res.stdout).strip())
+            subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", AIRPLAY_SNAPCLIENT_SERVICE],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", BT_SNAPCLIENT_SERVICE],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return ok({"active": "bluetooth", "target": target})
+        return err("invalid output type")
+    except Exception as e:
+        return err("output select failed", 500, detail=str(e))
 
 
 @app.post("/api/library/queue/random-next")

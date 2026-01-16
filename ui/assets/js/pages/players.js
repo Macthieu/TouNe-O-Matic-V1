@@ -2,6 +2,7 @@ import { card, listRow, coverEl, button, pill } from "../components/ui.js";
 import { store } from "../store.js";
 import { toast } from "../utils.js";
 import { AppConfig } from "../config.js";
+import { renderRoute } from "../router.js";
 
 export async function render(root){
   const st = store.get();
@@ -19,11 +20,19 @@ export async function render(root){
 
   c.body.append(top);
 
+  const outputCard = card({ title:"Sorties audio", subtitle:"Changer la destination" });
+  const outputList = document.createElement("div");
+  outputList.className = "list";
+  outputList.style.marginTop = "10px";
+  outputCard.body.append(outputList);
+  root.append(outputCard.root);
+
   const list = document.createElement("div");
   list.className = "list";
   list.style.marginTop = "12px";
 
   if(AppConfig.transport === "rest"){
+    await renderOutputTargets(outputList);
     await renderSnapcastDevices(list);
   } else {
     const devices = [
@@ -53,6 +62,97 @@ export async function render(root){
 
   if(AppConfig.transport === "rest"){
     await renderSnapcastGroups(g);
+  }
+}
+
+async function renderOutputTargets(list){
+  list.innerHTML = '<div class="muted">Chargement des sorties…</div>';
+  try {
+    const [airplayRes, btRes] = await Promise.all([
+      fetch(`${AppConfig.restBaseUrl}/airplay/targets`).then((r)=>r.json()).catch(()=>null),
+      fetch(`${AppConfig.restBaseUrl}/bluetooth/targets`).then((r)=>r.json()).catch(()=>null),
+    ]);
+    const airplay = airplayRes?.ok ? airplayRes.data : {sinks: [], current: "", active: false};
+    const bt = btRes?.ok ? btRes.data : {sinks: [], current: "", active: false};
+
+    const active = airplay.active ? "airplay" : (bt.active ? "bluetooth" : "local");
+    list.innerHTML = "";
+
+    list.append(listRow({
+      title: "Meuble Stéréo TouNe-O-Matic",
+      subtitle: active === "local" ? "Local • actif" : "Local",
+      left: coverEl("sm", "local"),
+      right: button(active === "local" ? "Actif" : "Sélectionner", {
+        disabled: active === "local",
+        onClick: async (ev)=>{
+          ev.stopPropagation();
+          await outputSelect("local");
+        }
+      }),
+    }));
+
+    (airplay.sinks || []).forEach((s)=>{
+      const isActive = active === "airplay" && airplay.current === s.name;
+      list.append(listRow({
+        title: s.description || s.name,
+        subtitle: isActive ? "AirPlay • actif" : "AirPlay",
+        left: coverEl("sm", s.description || s.name),
+        right: button(isActive ? "Actif" : "Sélectionner", {
+          disabled: isActive,
+          onClick: async (ev)=>{
+            ev.stopPropagation();
+            await outputSelect("airplay", s.name);
+          }
+        }),
+      }));
+    });
+
+    (bt.sinks || []).forEach((s)=>{
+      const isActive = active === "bluetooth" && bt.current === s.name;
+      list.append(listRow({
+        title: s.description || s.name,
+        subtitle: isActive ? "Bluetooth • actif" : "Bluetooth",
+        left: coverEl("sm", s.description || s.name),
+        right: button(isActive ? "Actif" : "Sélectionner", {
+          disabled: isActive,
+          onClick: async (ev)=>{
+            ev.stopPropagation();
+            await outputSelect("bluetooth", s.name);
+          }
+        }),
+      }));
+    });
+
+    if(!airplay.sinks?.length && !bt.sinks?.length){
+      list.append(listRow({
+        title: "Aucune sortie distante",
+        subtitle: "AirPlay/Bluetooth non détectés",
+        left: coverEl("sm", "output"),
+        right: button("OK", {disabled: true}),
+      }));
+    }
+  } catch {
+    list.innerHTML = '<div class="muted">Sorties audio indisponibles.</div>';
+  }
+}
+
+async function outputSelect(type, target){
+  if(AppConfig.transport !== "rest") return;
+  try {
+    const res = await fetch(`${AppConfig.restBaseUrl}/output/select`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({type, target})
+    });
+    const body = await res.json();
+    if(body?.ok){
+      toast(type === "local" ? "Sortie locale active" : "Sortie appliquée");
+      await renderRoute();
+    } else {
+      toast(body?.detail || body?.error || "Erreur sortie");
+    }
+  } catch {
+    toast("Erreur sortie");
   }
 }
 

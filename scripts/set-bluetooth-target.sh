@@ -11,33 +11,43 @@ fi
 
 echo "$SINK" | grep -Eq '^[A-Za-z0-9._:-]+$' || { echo "invalid sink name" >&2; exit 1; }
 
-if [ ! -f "$CONF" ]; then
-  cat >"$CONF" <<EOF
-PULSE_SERVER=unix:/var/run/pulse/native
-PULSE_SINK=$SINK
-SNAPCLIENT_BLUETOOTH_STREAM=mpd
-EOF
-else
-  SINK="$SINK" CONF="$CONF" /usr/bin/python3 - <<'PY'
+SINK="$SINK" CONF="$CONF" /usr/bin/python3 - <<'PY'
 import os
 from pathlib import Path
 
 sink = os.environ["SINK"]
 conf = Path(os.environ["CONF"])
-lines = conf.read_text().splitlines()
+
+defaults = {
+    "PULSE_SERVER": "unix:/var/run/pulse/native",
+    "PULSE_SINK": sink,
+    "SNAPCLIENT_BLUETOOTH_STREAM": "mpd",
+    "SNAPCLIENT_BLUETOOTH_LATENCY": "0",
+}
+
 out = []
-found = False
-for ln in lines:
-    if ln.startswith("PULSE_SINK="):
-        out.append(f"PULSE_SINK={sink}")
-        found = True
-    else:
-        out.append(ln)
-if not found:
-    out.append(f"PULSE_SINK={sink}")
-conf.write_text("\\n".join(out) + "\\n")
+seen = set()
+if conf.exists():
+    raw = conf.read_text()
+    # Normalize any literal "\n" sequences from bad writes.
+    raw = raw.replace("\\n", "\n")
+    for ln in raw.splitlines():
+        if not ln or ln.lstrip().startswith("#"):
+            continue
+        key, sep, val = ln.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        if key in defaults and key not in seen:
+            seen.add(key)
+            out.append(f"{key}={defaults[key]}")
+
+for key, val in defaults.items():
+    if key not in seen:
+        out.append(f"{key}={val}")
+
+conf.write_text("\n".join(out) + "\n")
 PY
-fi
 
 /usr/bin/systemctl restart snapclient-bluetooth
 echo "updated"

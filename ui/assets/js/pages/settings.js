@@ -196,7 +196,7 @@ export async function render(root){
   airplayOut.body.append(airplayWrap);
   root.append(airplayOut.root);
 
-  const btOut = card({ title:"Sortie Bluetooth", subtitle:"Connecter un appareil et envoyer le son" });
+  const btOut = card({ title:"Sortie Bluetooth", subtitle:"Connecter un appareil et envoyer le son (PulseAudio)" });
   const btWrap = document.createElement("div");
   btWrap.style.display = "grid";
   btWrap.style.gap = "10px";
@@ -230,6 +230,34 @@ export async function render(root){
     await refreshBluetoothTargets();
   }});
   btRow.append(btSelect, btApply, btToggle, btRefresh);
+  const btLatencyRow = document.createElement("div");
+  btLatencyRow.style.display = "grid";
+  btLatencyRow.style.gridTemplateColumns = "1fr auto";
+  btLatencyRow.style.alignItems = "center";
+  btLatencyRow.style.gap = "12px";
+  const btLatencyLabel = document.createElement("div");
+  btLatencyLabel.className = "muted small";
+  btLatencyLabel.textContent = "Latence BT: — ms";
+  const btLatencySelect = document.createElement("select");
+  btLatencySelect.className = "input";
+  btLatencySelect.style.height = "36px";
+  btLatencySelect.style.padding = "0 10px";
+  btLatencySelect.style.maxWidth = "240px";
+  [0, 50, 100, 200, 300, 500, 800, 1000, 1500, 2000, 3000, 5000].forEach((ms)=>{
+    const opt = document.createElement("option");
+    opt.value = String(ms);
+    opt.textContent = `${ms} ms`;
+    btLatencySelect.append(opt);
+  });
+  const btLatencyApply = button("Appliquer latence", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    const val = Number(btLatencySelect.value || 0);
+    await applyBluetoothLatency(val);
+  }});
+  const btLatencyNote = document.createElement("div");
+  btLatencyNote.className = "muted small";
+  btLatencyNote.textContent = "Utile si le son saccade (plus haut = plus stable).";
+  btLatencyRow.append(btLatencySelect, btLatencyApply);
 
   const btDevList = document.createElement("div");
   btDevList.className = "list";
@@ -245,9 +273,24 @@ export async function render(root){
     ev.stopPropagation();
     await refreshBluetoothDevices();
   }});
-  btDevActions.append(btScanBtn, btListBtn);
+  const btBeatsBtn = button("Activer sortie Beats", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    await activateBeatsOutput();
+  }});
+  const btPairBtn = button("Pairer Beats", {onClick: async (ev)=>{
+    ev.stopPropagation();
+    await pairBeats();
+    await refreshBluetoothDevices();
+  }});
+  const btResetBtn = button("Réinitialiser BT", {kind:"danger", onClick: async (ev)=>{
+    ev.stopPropagation();
+    await resetBluetooth();
+    await refreshBluetoothDevices();
+    await refreshBluetoothTargets();
+  }});
+  btDevActions.append(btScanBtn, btListBtn, btBeatsBtn, btPairBtn, btResetBtn);
 
-  btWrap.append(btInfo, btRow, btDevActions, btDevList);
+  btWrap.append(btInfo, btRow, btLatencyLabel, btLatencyRow, btLatencyNote, btDevActions, btDevList);
   btOut.body.append(btWrap);
   root.append(btOut.root);
 
@@ -566,6 +609,11 @@ export async function render(root){
       const body = await res.json();
       if(!body?.ok) return;
       btState = body.data || btState;
+      const latencyMs = Number(btState.latency_ms);
+      if(!Number.isNaN(latencyMs)){
+        btLatencySelect.value = String(latencyMs);
+        btLatencyLabel.textContent = `Latence BT: ${latencyMs} ms`;
+      }
       const sinks = btState.sinks || [];
       btSelect.innerHTML = "";
       if(!sinks.length){
@@ -603,6 +651,24 @@ export async function render(root){
     } catch {}
   }
 
+  async function activateBeatsOutput(){
+    if(AppConfig.transport !== "rest") return;
+    await refreshBluetoothTargets();
+    const sinks = btState.sinks || [];
+    const beats = sinks.find((s)=>{
+      const label = `${s.description || ""} ${s.name || ""}`.toLowerCase();
+      return label.includes("beats");
+    });
+    if(!beats){
+      toast("Aucune sortie Beats détectée");
+      return;
+    }
+    await setBluetoothTarget(beats.name);
+    await toggleBluetoothSend(true);
+    toast("Sortie Beats activée");
+    await refreshBluetoothTargets();
+  }
+
   function renderBluetoothDevices(){
     btDevList.innerHTML = "";
     if(!btDevices.length){
@@ -622,9 +688,27 @@ export async function render(root){
           }})
         : button("Connecter", {onClick: async (ev)=>{
             ev.stopPropagation();
-            await bluetoothConnect(d.mac);
-            await refreshBluetoothDevices();
-            await refreshBluetoothTargets();
+            const btn = ev.currentTarget;
+            btn.disabled = true;
+            btn.textContent = "Connexion…";
+            toast(`Connexion à ${d.name || d.mac}…`);
+            await bluetoothConnect(d.mac, d.name);
+            const start = Date.now();
+            const poll = async ()=>{
+              await refreshBluetoothDevices();
+              await refreshBluetoothTargets();
+              const found = (btDevices || []).find((x)=>x.mac === d.mac);
+              if(found?.connected || Date.now() - start > 12000){
+                btn.disabled = false;
+                btn.textContent = "Connecter";
+                if(!found?.connected){
+                  toast("Connexion Bluetooth échouée");
+                }
+                return;
+              }
+              setTimeout(poll, 1500);
+            };
+            poll();
           }});
       btDevList.append(listRow({
         title: d.name || d.mac,
@@ -638,10 +722,26 @@ export async function render(root){
   async function scanBluetooth(){
     if(AppConfig.transport !== "rest") return;
     try {
-      const res = await fetch(`${AppConfig.restBaseUrl}/bluetooth/scan`, {method: "POST"});
+      toast("Scan Bluetooth en cours…");
+      fetch(`${AppConfig.restBaseUrl}/bluetooth/scan`, {method: "POST"})
+        .then((res)=>res.json())
+        .then((body)=>{
+          if(!body?.ok) toast(body?.error || "Erreur Bluetooth");
+        })
+        .catch(()=>toast("Erreur Bluetooth"));
+      setTimeout(refreshBluetoothDevices, 1200);
+    } catch {
+      toast("Erreur Bluetooth");
+    }
+  }
+
+  async function resetBluetooth(){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/bluetooth/reset`, {method: "POST"});
       const body = await res.json();
       if(body?.ok){
-        toast("Scan Bluetooth lancé");
+        toast("Bluetooth réinitialisé");
       } else {
         toast(body?.error || "Erreur Bluetooth");
       }
@@ -650,19 +750,39 @@ export async function render(root){
     }
   }
 
-  async function bluetoothConnect(mac){
+  async function pairBeats(){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      toast("Pairing Beats en cours…");
+      const res = await fetch(`${AppConfig.restBaseUrl}/bluetooth/pair`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({mac: "4C:97:CC:19:9F:15", name: "Beats Solo 4"})
+      });
+      const body = await res.json();
+      if(body?.ok){
+        toast("Pairing Beats lancé");
+      } else {
+        toast(body?.detail || body?.error || "Erreur Bluetooth");
+      }
+    } catch {
+      toast("Erreur Bluetooth");
+    }
+  }
+
+  async function bluetoothConnect(mac, name){
     if(AppConfig.transport !== "rest") return;
     try {
       const res = await fetch(`${AppConfig.restBaseUrl}/bluetooth/connect`, {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({mac})
+        body: JSON.stringify({mac, name, async: true})
       });
       const body = await res.json();
       if(body?.ok){
-        toast("Bluetooth connecté");
+        toast("Connexion Bluetooth lancée");
       } else {
-        toast(body?.error || "Erreur Bluetooth");
+        toast(body?.detail || body?.error || "Erreur Bluetooth");
       }
     } catch {
       toast("Erreur Bluetooth");
@@ -681,7 +801,7 @@ export async function render(root){
       if(body?.ok){
         toast("Bluetooth déconnecté");
       } else {
-        toast(body?.error || "Erreur Bluetooth");
+        toast(body?.detail || body?.error || "Erreur Bluetooth");
       }
     } catch {
       toast("Erreur Bluetooth");
@@ -700,7 +820,7 @@ export async function render(root){
       if(body?.ok){
         toast("Sortie Bluetooth mise à jour");
       } else {
-        toast(body?.error || "Erreur Bluetooth");
+        toast(body?.detail || body?.error || "Erreur Bluetooth");
       }
     } catch {
       toast("Erreur Bluetooth");
@@ -718,6 +838,26 @@ export async function render(root){
       const body = await res.json();
       if(body?.ok){
         toast(enabled ? "Envoi Bluetooth activé" : "Envoi Bluetooth arrêté");
+      } else {
+        toast(body?.detail || body?.error || "Erreur Bluetooth");
+      }
+    } catch {
+      toast("Erreur Bluetooth");
+    }
+  }
+
+  async function applyBluetoothLatency(ms){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/bluetooth/latency`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({latency_ms: ms})
+      });
+      const body = await res.json();
+      if(body?.ok){
+        btLatencyLabel.textContent = `Latence BT: ${body.data.latency_ms} ms`;
+        toast("Latence Bluetooth appliquée");
       } else {
         toast(body?.error || "Erreur Bluetooth");
       }
