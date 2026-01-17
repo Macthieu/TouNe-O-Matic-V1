@@ -78,6 +78,8 @@ async function renderOutputTargets(list){
     const active = airplay.active ? "airplay" : (bt.active ? "bluetooth" : "local");
     list.innerHTML = "";
 
+    const airplaySinks = normalizeAirplaySinks(airplay.sinks || [], airplay.current);
+
     list.append(listRow({
       title: "Meuble Stéréo TouNe-O-Matic",
       subtitle: active === "local" ? "Local • actif" : "Local",
@@ -91,12 +93,12 @@ async function renderOutputTargets(list){
       }),
     }));
 
-    (airplay.sinks || []).forEach((s)=>{
+    airplaySinks.forEach((s)=>{
       const isActive = active === "airplay" && airplay.current === s.name;
       list.append(listRow({
-        title: s.description || s.name,
+        title: s.display || s.description || s.name,
         subtitle: isActive ? "AirPlay • actif" : "AirPlay",
-        left: coverEl("sm", s.description || s.name),
+        left: coverEl("sm", s.display || s.description || s.name),
         right: button(isActive ? "Actif" : "Sélectionner", {
           disabled: isActive,
           onClick: async (ev)=>{
@@ -123,7 +125,7 @@ async function renderOutputTargets(list){
       }));
     });
 
-    if(!airplay.sinks?.length && !bt.sinks?.length){
+    if(!airplaySinks.length && !bt.sinks?.length){
       list.append(listRow({
         title: "Aucune sortie distante",
         subtitle: "AirPlay/Bluetooth non détectés",
@@ -134,6 +136,29 @@ async function renderOutputTargets(list){
   } catch {
     list.innerHTML = '<div class="muted">Sorties audio indisponibles.</div>';
   }
+}
+
+function normalizeAirplaySinks(sinks, current){
+  const byDesc = new Map();
+  sinks.forEach((s)=>{
+    const desc = s.description || s.name || "AirPlay";
+    if(!byDesc.has(desc)) byDesc.set(desc, []);
+    byDesc.get(desc).push(s);
+  });
+  const out = [];
+  for(const [desc, items] of byDesc.entries()){
+    if(items.length === 1){
+      out.push({...items[0], display: desc});
+      continue;
+    }
+    const sorted = items.slice().sort((a,b)=>String(a.name).length - String(b.name).length);
+    sorted.forEach((s)=>{
+      const suffix = (s.name || "").split(".").pop();
+      const display = suffix && suffix !== "local" ? `${desc} (${suffix})` : desc;
+      out.push({...s, display});
+    });
+  }
+  return out;
 }
 
 async function outputSelect(type, target){

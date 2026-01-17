@@ -576,7 +576,7 @@ export async function render(root){
       const body = await res.json();
       if(!body?.ok) return;
       airplayState = body.data || airplayState;
-      const sinks = airplayState.sinks || [];
+      const sinks = normalizeAirplaySinks(airplayState.sinks || []);
       airplaySelect.innerHTML = "";
       if(!sinks.length){
         const opt = document.createElement("option");
@@ -589,7 +589,7 @@ export async function render(root){
         sinks.forEach((s)=>{
           const opt = document.createElement("option");
           opt.value = s.name;
-          opt.textContent = s.description || s.name;
+          opt.textContent = s.display || s.description || s.name;
           if(airplayState.current && s.name === airplayState.current) opt.selected = true;
           airplaySelect.append(opt);
         });
@@ -600,6 +600,29 @@ export async function render(root){
       airplayToggle.textContent = airplayState.active ? "Arrêter envoi" : "Activer envoi";
       airplayToggle.setAttribute("data-active", airplayState.active ? "true" : "false");
     } catch {}
+  }
+
+  function normalizeAirplaySinks(sinks){
+    const byDesc = new Map();
+    sinks.forEach((s)=>{
+      const desc = s.description || s.name || "AirPlay";
+      if(!byDesc.has(desc)) byDesc.set(desc, []);
+      byDesc.get(desc).push(s);
+    });
+    const out = [];
+    for(const [desc, items] of byDesc.entries()){
+      if(items.length === 1){
+        out.push({...items[0], display: desc});
+        continue;
+      }
+      const sorted = items.slice().sort((a,b)=>String(a.name).length - String(b.name).length);
+      sorted.forEach((s)=>{
+        const suffix = (s.name || "").split(".").pop();
+        const display = suffix && suffix !== "local" ? `${desc} (${suffix})` : desc;
+        out.push({...s, display});
+      });
+    }
+    return out;
   }
 
   async function refreshBluetoothTargets(){

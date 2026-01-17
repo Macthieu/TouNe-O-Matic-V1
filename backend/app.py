@@ -10,11 +10,13 @@ import random
 import sqlite3
 import threading
 import time
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Iterable
 import re
 import unicodedata
 import subprocess
+import socket
 from urllib.parse import urlparse
 
 from flask import Flask, jsonify, request, send_file, make_response
@@ -905,6 +907,25 @@ def _snapcast_status() -> Dict[str, Any]:
         })
     streams = result.get("server", {}).get("streams", []) or []
     return {"groups": groups, "clients": list(all_clients.values()), "streams": streams}
+
+
+def _snapcast_set_local_stream(stream_id: str) -> bool:
+    try:
+        data = _snapcast_status()
+    except Exception:
+        return False
+    hostname = socket.gethostname()
+    local_ips = {"127.0.0.1", "::ffff:127.0.0.1"}
+    for group in data.get("groups", []) or []:
+        for client in group.get("clients", []) or []:
+            host = client.get("host") or {}
+            if host.get("ip") in local_ips or host.get("name") == hostname:
+                group_id = group.get("id")
+                if not group_id:
+                    continue
+                _snapcast_rpc("Group.SetStream", {"id": group_id, "stream_id": stream_id})
+                return True
+    return False
 
 
 def _service_status(name: str) -> Dict[str, Any]:
@@ -2062,7 +2083,23 @@ def _write_bt_conf(updates: Dict[str, str]) -> Dict[str, str]:
             lines.append(f"{key}={data[key]}")
     for key in sorted(k for k in data.keys() if k not in order):
         lines.append(f"{key}={data[key]}")
-    BT_SNAPCLIENT_CONF.write_text("\n".join(lines) + "\n")
+    content = "\n".join(lines) + "\n"
+    try:
+        BT_SNAPCLIENT_CONF.write_text(content)
+    except PermissionError:
+        with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        subprocess.run(
+            ["/usr/bin/sudo", "-n", "/bin/cp", tmp_path, str(BT_SNAPCLIENT_CONF)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        try:
+            Path(tmp_path).unlink()
+        except Exception:
+            pass
     return data
 
 
@@ -2122,6 +2159,13 @@ def airplay_target_set():
         )
         if res.returncode != 0:
             return err("airplay target update failed", 500, detail=(res.stderr or res.stdout).strip())
+        if _service_active(AIRPLAY_SNAPCLIENT_SERVICE):
+            subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "restart", AIRPLAY_SNAPCLIENT_SERVICE],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
         return ok({"sink": sink})
     except Exception as e:
         return err("airplay target update failed", 500, detail=str(e))
@@ -2141,6 +2185,8 @@ def airplay_send_toggle():
         )
         if res.returncode != 0:
             return err("airplay send update failed", 500, detail=(res.stderr or res.stdout).strip())
+        if enabled:
+            _snapcast_set_local_stream("mpd")
         return ok({"active": _service_active(AIRPLAY_SNAPCLIENT_SERVICE)})
     except Exception as e:
         return err("airplay send update failed", 500, detail=str(e))
@@ -2459,6 +2505,13 @@ def bluetooth_target_set():
         )
         if res.returncode != 0:
             return err("bluetooth target update failed", 500, detail=(res.stderr or res.stdout).strip())
+        if _service_active(BT_SNAPCLIENT_SERVICE):
+            subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "restart", BT_SNAPCLIENT_SERVICE],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
         return ok({"sink": sink})
     except Exception as e:
         return err("bluetooth target update failed", 500, detail=str(e))
@@ -2478,6 +2531,8 @@ def bluetooth_send_toggle():
         )
         if res.returncode != 0:
             return err("bluetooth send update failed", 500, detail=(res.stderr or res.stdout).strip())
+        if enabled:
+            _snapcast_set_local_stream("mpd")
         return ok({"active": _service_active(BT_SNAPCLIENT_SERVICE)})
     except Exception as e:
         return err("bluetooth send update failed", 500, detail=str(e))
@@ -2605,7 +2660,7 @@ def output_select():
     kind = (data.get("type") or "").strip().lower()
     target = (data.get("target") or "").strip()
     try:
-        if kind == "local":
+        if kind in {"local", "airplay", "bluetooth"}:
             subprocess.run(
                 ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", AIRPLAY_SNAPCLIENT_SERVICE],
                 capture_output=True,
@@ -2618,6 +2673,8 @@ def output_select():
                 text=True,
                 timeout=10,
             )
+        if kind == "local":
+            _snapcast_set_local_stream("mpd")
             return ok({"active": "local"})
         if kind == "airplay":
             if not target:
@@ -2632,17 +2689,12 @@ def output_select():
             if res.returncode != 0:
                 return err("airplay target update failed", 500, detail=(res.stderr or res.stdout).strip())
             subprocess.run(
-                ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", BT_SNAPCLIENT_SERVICE],
+                ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "restart", AIRPLAY_SNAPCLIENT_SERVICE],
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
-            subprocess.run(
-                ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", AIRPLAY_SNAPCLIENT_SERVICE],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
+            _snapcast_set_local_stream("mpd")
             return ok({"active": "airplay", "target": target})
         if kind == "bluetooth":
             if not target:
@@ -2657,17 +2709,12 @@ def output_select():
             if res.returncode != 0:
                 return err("bluetooth target update failed", 500, detail=(res.stderr or res.stdout).strip())
             subprocess.run(
-                ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", AIRPLAY_SNAPCLIENT_SERVICE],
+                ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "restart", BT_SNAPCLIENT_SERVICE],
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
-            subprocess.run(
-                ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", BT_SNAPCLIENT_SERVICE],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
+            _snapcast_set_local_stream("mpd")
             return ok({"active": "bluetooth", "target": target})
         return err("invalid output type")
     except Exception as e:
