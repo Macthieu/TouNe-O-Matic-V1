@@ -1122,6 +1122,32 @@ def _serve_image(path: Path, size: Optional[int] = None):
     return resp
 
 
+def _mpd_listallinfo_chunked() -> List[Dict[str, Any]]:
+    try:
+        with mpd_client() as c:
+            root_items = c.lsinfo()
+    except Exception:
+        with mpd_client() as c:
+            return c.listallinfo()
+    dirs = [i.get("directory") for i in root_items if isinstance(i, dict) and i.get("directory")]
+    if not dirs:
+        with mpd_client() as c:
+            return c.listallinfo()
+    items: List[Dict[str, Any]] = []
+    for d in dirs:
+        for attempt in range(2):
+            try:
+                with mpd_client() as c:
+                    items.extend(c.listallinfo(d))
+                break
+            except Exception:
+                if attempt == 0:
+                    time.sleep(1)
+                    continue
+                raise
+    return items
+
+
 def _scan_library_worker():
     SCAN_STATE.update({
         "running": True,
@@ -1150,7 +1176,7 @@ def _scan_library_worker():
                         pass
                     _wait_mpd_update(c, timeout_s=300)
                     SCAN_STATE["phase"] = "indexing"
-                    items = c.listallinfo()
+                    items = _mpd_listallinfo_chunked()
                 break
             except Exception as e:
                 if attempt == 0:
@@ -2103,12 +2129,14 @@ def _write_bt_conf(updates: Dict[str, str]) -> Dict[str, str]:
     return data
 
 
-def _read_bt_latency() -> int:
+def _read_bt_latency_info() -> Dict[str, Any]:
     data = _read_bt_conf()
+    if "SNAPCLIENT_BLUETOOTH_LATENCY" not in data:
+        return {"latency_ms": 0, "latency_set": False}
     try:
-        return int(data.get("SNAPCLIENT_BLUETOOTH_LATENCY", "0"))
+        return {"latency_ms": int(data.get("SNAPCLIENT_BLUETOOTH_LATENCY", "0")), "latency_set": True}
     except Exception:
-        return 0
+        return {"latency_ms": 0, "latency_set": True}
 
 
 def _read_airplay_sink() -> str:
@@ -2476,11 +2504,12 @@ def bluetooth_targets():
     try:
         sinks = _pactl_list_bt_sinks()
         current = _read_bt_sink()
+        latency_info = _read_bt_latency_info()
         return ok({
             "sinks": sinks,
             "current": current,
             "active": _service_active(BT_SNAPCLIENT_SERVICE),
-            "latency_ms": _read_bt_latency(),
+            **latency_info,
         })
     except Exception as e:
         return err("bluetooth targets failed", 500, detail=str(e))
@@ -2541,7 +2570,7 @@ def bluetooth_send_toggle():
 @app.get("/api/bluetooth/latency")
 def bluetooth_latency():
     try:
-        return ok({"latency_ms": _read_bt_latency()})
+        return ok(_read_bt_latency_info())
     except Exception as e:
         return err("bluetooth latency failed", 500, detail=str(e))
 
@@ -2563,7 +2592,7 @@ def bluetooth_latency_set():
             text=True,
             timeout=10,
         )
-        return ok({"latency_ms": latency_ms})
+        return ok({"latency_ms": latency_ms, "latency_set": True})
     except Exception as e:
         return err("bluetooth latency update failed", 500, detail=str(e))
 

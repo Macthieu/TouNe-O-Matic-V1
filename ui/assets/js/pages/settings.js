@@ -146,17 +146,6 @@ export async function render(root){
 
   cmdWrap.append(cmdLogBox, cmdActions);
   cmdCard.body.append(cmdWrap);
-  root.append(cmdCard.root);
-
-  const sources = card({ title:"Sources audio", subtitle:"AirPlay, Spotify, Snapclient" });
-  const sourcesWrap = document.createElement("div");
-  sourcesWrap.style.display = "grid";
-  sourcesWrap.style.gap = "10px";
-  const sourcesList = document.createElement("div");
-  sourcesList.className = "list";
-  sourcesWrap.append(sourcesList);
-  sources.body.append(sourcesWrap);
-  root.append(sources.root);
 
   const airplayOut = card({ title:"Sortie AirPlay", subtitle:"Envoyer le son vers un appareil AirPlay" });
   const airplayWrap = document.createElement("div");
@@ -352,26 +341,6 @@ export async function render(root){
   multi.body.append(multiWrap);
   root.append(multi.root);
 
-  const pl = card({ title:"Paramètres lecteur", subtitle:"Crossfade, replay gain, etc. (UI only)" });
-  const list2 = document.createElement("div");
-  list2.className = "list";
-  const rows = [
-    ["Crossfade", "0 s (démo)"],
-    ["ReplayGain", "Off (démo)"],
-    ["Random", st.player.random ? "On" : "Off"],
-    ["Repeat", st.player.repeat],
-  ];
-  for(const [t,sub] of rows){
-    list2.append(listRow({
-      title:t,
-      subtitle:sub,
-      left: coverEl("sm", t),
-      right: button("Modifier", {onClick:(ev)=>{ev.stopPropagation(); toast("Démo : brancher plus tard.");}})
-    }));
-  }
-  pl.body.append(list2);
-  root.append(pl.root);
-
   const libs = card({ title:"Bibliothèques externes", subtitle:"Détection auto des montages /mnt/media" });
   const libsWrap = document.createElement("div");
   libsWrap.style.display = "grid";
@@ -452,13 +421,13 @@ export async function render(root){
     </div>
   `;
   root.append(srv.root);
+  root.append(cmdCard.root);
 
   let lastRunning = false;
   let pollTimer = null;
   let scanLogs = [];
   let docsLogs = [];
   let cmdLogs = [];
-  let servicesStatus = [];
   let libsData = null;
   let lastDocsRunning = false;
   let docsPoll = null;
@@ -556,11 +525,11 @@ export async function render(root){
       latencyList.innerHTML = "";
       clients.forEach((c)=>{
         const row = document.createElement("div");
-        row.className = "row";
+        row.className = "row row--wide";
         row.innerHTML = `
           <div class="row__main">
-            <div class="row__title ellipsis">${c.name || c.host?.name || c.id || "Client"}</div>
-            <div class="row__sub ellipsis muted small">Snapcast • ${c.connected ? "en ligne" : "hors ligne"} • ${c.group || "Groupe"}</div>
+            <div class="row__title wrap">${c.name || c.host?.name || c.id || "Client"}</div>
+            <div class="row__sub wrap muted small">Snapcast • ${c.connected ? "en ligne" : "hors ligne"} • ${c.group || "Groupe"}</div>
           </div>
           <div class="row__trail muted small">${c.latency ?? "—"} ms</div>
         `;
@@ -633,9 +602,10 @@ export async function render(root){
       if(!body?.ok) return;
       btState = body.data || btState;
       const latencyMs = Number(btState.latency_ms);
+      const latencySet = btState.latency_set !== false;
       if(!Number.isNaN(latencyMs)){
         btLatencySelect.value = String(latencyMs);
-        btLatencyLabel.textContent = `Latence BT: ${latencyMs} ms`;
+        btLatencyLabel.textContent = latencySet ? `Latence BT: ${latencyMs} ms` : "Latence BT: auto";
       }
       const sinks = btState.sinks || [];
       btSelect.innerHTML = "";
@@ -879,7 +849,8 @@ export async function render(root){
       });
       const body = await res.json();
       if(body?.ok){
-        btLatencyLabel.textContent = `Latence BT: ${body.data.latency_ms} ms`;
+        const set = body.data?.latency_set !== false;
+        btLatencyLabel.textContent = set ? `Latence BT: ${body.data.latency_ms} ms` : "Latence BT: auto";
         toast("Latence Bluetooth appliquée");
       } else {
         toast(body?.error || "Erreur Bluetooth");
@@ -984,16 +955,6 @@ export async function render(root){
     }
   }
 
-  async function fetchServicesStatus(){
-    if(AppConfig.transport !== "rest") return [];
-    try {
-      const res = await fetch(`${AppConfig.restBaseUrl}/services/status`);
-      const body = await res.json();
-      if(body?.ok && Array.isArray(body.data)) return body.data;
-    } catch {}
-    return [];
-  }
-
   async function fetchLibraryRoots(){
     if(AppConfig.transport !== "rest") return null;
     try {
@@ -1096,53 +1057,6 @@ export async function render(root){
       lines.push("");
     });
     libsResultPre.innerHTML = lines.join("\n").trim();
-  }
-
-  async function serviceAction(name, action){
-    if(AppConfig.transport !== "rest") return null;
-    try {
-      const res = await fetch(`${AppConfig.restBaseUrl}/services/action`, {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({name, action})
-      });
-      const body = await res.json();
-      if(body?.ok) return body.data;
-      toast(body?.error || "Erreur service");
-    } catch {
-      toast("Erreur service");
-    }
-    return null;
-  }
-
-  function renderSources(){
-    sourcesList.innerHTML = "";
-    if(!servicesStatus.length){
-      sourcesList.innerHTML = '<div class="muted">Aucune source détectée.</div>';
-      return;
-    }
-    servicesStatus.forEach((s)=>{
-      const label = s.name?.replace(".service", "") || "Service";
-      const subtitle = s.installed
-        ? (s.active ? "en cours" : "arrêté")
-        : "non installé";
-      const actionBtn = s.installed
-        ? button(s.active ? "Stop" : "Start", {onClick: async (ev)=>{
-            ev.stopPropagation();
-            const res = await serviceAction(s.name, s.active ? "stop" : "start");
-            if(res) {
-              servicesStatus = await fetchServicesStatus();
-              renderSources();
-            }
-          }})
-        : button("Installer", {onClick: (ev)=>{ev.stopPropagation(); toast("Installe via apt (shairport-sync/librespot)");}});
-      sourcesList.append(listRow({
-        title: label,
-        subtitle,
-        left: coverEl("sm", label),
-        right: actionBtn
-      }));
-    });
   }
 
   async function startScan(){
@@ -1287,8 +1201,6 @@ export async function render(root){
   await refreshBluetoothTargets();
   cmdLogs = await fetchCmdLogs();
   renderLogs(cmdLogBox, cmdLogPre, cmdLogs, false);
-  servicesStatus = await fetchServicesStatus();
-  renderSources();
   libsData = await fetchLibraryRoots();
   renderLibraryRoots();
 }

@@ -52,6 +52,7 @@ a{ color:inherit; text-decoration:none; }
 svg{ fill: currentColor; }
 
 .ellipsis{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.wrap{ white-space:normal; overflow:visible; text-overflow:clip; }
 .small{ font-size: 12px; }
 .muted{ color: var(--muted); }
 .strong{ font-weight: 650; }
@@ -412,6 +413,12 @@ svg{ fill: currentColor; }
 .row__title{ font-size: 13px; font-weight: 650; }
 .row__sub{ font-size: 12px; margin-top: 2px; }
 .row__trail{ color: var(--muted); }
+.row--wide{
+  grid-template-columns: 1fr auto;
+}
+.row--wide .row__main{
+  min-width: 0;
+}
 
 /* Pages */
 .page{ display:flex; flex-direction:column; gap: 14px; }

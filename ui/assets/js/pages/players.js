@@ -109,11 +109,15 @@ async function renderOutputTargets(list){
       }));
     });
 
+    const btLatency = Number(bt.latency_ms);
+    const btLatencyLabel = (bt.latency_set === false || Number.isNaN(btLatency))
+      ? ""
+      : ` • latence ${btLatency} ms`;
     (bt.sinks || []).forEach((s)=>{
       const isActive = active === "bluetooth" && bt.current === s.name;
       list.append(listRow({
         title: s.description || s.name,
-        subtitle: isActive ? "Bluetooth • actif" : "Bluetooth",
+        subtitle: isActive ? `Bluetooth • actif${btLatencyLabel}` : `Bluetooth${btLatencyLabel}`,
         left: coverEl("sm", s.description || s.name),
         right: button(isActive ? "Actif" : "Sélectionner", {
           disabled: isActive,
