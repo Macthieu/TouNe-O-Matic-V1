@@ -39,6 +39,13 @@ export async function render(root){
       <button class="btn" id="npAdd">Ajouter à une playlist</button>
       <button class="btn" id="npFav">Ajouter aux favoris</button>
     </div>
+    <div class="now__progress">
+      <input id="seekNow" type="range" min="0" max="1000" value="0" aria-label="Position" />
+      <div class="now__times">
+        <span class="time muted" id="npCur">0:00</span>
+        <span class="time muted" id="npDur">0:00</span>
+      </div>
+    </div>
   `;
 
   wrap.append(cover, meta);

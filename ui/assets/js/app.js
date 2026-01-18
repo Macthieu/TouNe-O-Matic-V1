@@ -272,20 +272,35 @@ $("#btnPrev")?.addEventListener("click", async ()=>{ await mpd.prev(); });
 $("#btnNext")?.addEventListener("click", async ()=>{ await mpd.next(); });
 
 const seek = $("#seek");
+const seekNow = $("#seekNow");
+const seekEls = [seek, seekNow].filter(Boolean);
 let seeking = false;
-seek?.addEventListener("pointerdown", ()=>{ seeking = true; });
-seek?.addEventListener("pointerup", async ()=>{
-  seeking = false;
-  const st = store.get().player;
-  const ratio = (Number(seek.value) || 0) / 1000;
-  await mpd.seek(ratio * (st.duration || 0));
-});
-seek?.addEventListener("input", ()=>{
-  // live preview of time
-  const st = store.get().player;
-  const ratio = (Number(seek.value) || 0) / 1000;
-  $("#tCur").textContent = formatTime(ratio * (st.duration || 0));
-});
+let seekingEl = null;
+
+function bindSeek(el){
+  el.addEventListener("pointerdown", ()=>{
+    seeking = true;
+    seekingEl = el;
+  });
+  el.addEventListener("pointerup", async ()=>{
+    seeking = false;
+    seekingEl = null;
+    const st = store.get().player;
+    const ratio = (Number(el.value) || 0) / 1000;
+    await mpd.seek(ratio * (st.duration || 0));
+  });
+  el.addEventListener("input", ()=>{
+    // live preview of time
+    const st = store.get().player;
+    const ratio = (Number(el.value) || 0) / 1000;
+    const preview = formatTime(ratio * (st.duration || 0));
+    const tCur = $("#tCur");
+    const npCur = $("#npCur");
+    if(tCur) tCur.textContent = preview;
+    if(npCur) npCur.textContent = preview;
+  });
+}
+seekEls.forEach(bindSeek);
 
 // Queue sheet
 const sheetBackdrop = $("#sheetBackdrop");
@@ -379,24 +394,37 @@ function renderPlayerBar(state){
   if(airplayActive){
     $("#tCur").textContent = "—";
     $("#tDur").textContent = "—";
-    if(seek){
-      seek.value = "0";
-      seek.setAttribute("disabled", "disabled");
-      seek.classList.add("is-disabled");
+    const npCur = $("#npCur");
+    const npDur = $("#npDur");
+    if(npCur) npCur.textContent = "—";
+    if(npDur) npDur.textContent = "—";
+    for(const el of seekEls){
+      el.value = "0";
+      el.setAttribute("disabled", "disabled");
+      el.classList.add("is-disabled");
     }
   } else {
-    $("#tCur").textContent = formatTime(p.elapsed || 0);
-    $("#tDur").textContent = formatTime(p.duration || 0);
-    if(seek){
-      seek.removeAttribute("disabled");
-      seek.classList.remove("is-disabled");
+    const cur = formatTime(p.elapsed || 0);
+    const dur = formatTime(p.duration || 0);
+    $("#tCur").textContent = cur;
+    $("#tDur").textContent = dur;
+    const npCur = $("#npCur");
+    const npDur = $("#npDur");
+    if(npCur) npCur.textContent = cur;
+    if(npDur) npDur.textContent = dur;
+    for(const el of seekEls){
+      el.removeAttribute("disabled");
+      el.classList.remove("is-disabled");
     }
   }
 
   // progress bar (avoid snapping while user is seeking)
-  if(!seeking && seek){
+  if(!seeking && seekEls.length){
     const ratio = (p.duration ? (p.elapsed / p.duration) : 0);
-    seek.value = String(Math.round(clamp(ratio, 0, 1) * 1000));
+    const nextValue = String(Math.round(clamp(ratio, 0, 1) * 1000));
+    for(const el of seekEls){
+      el.value = nextValue;
+    }
   }
 
   // icon play/pause

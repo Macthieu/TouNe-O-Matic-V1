@@ -22,7 +22,7 @@
 
   --appbar-h: 56px;
   --drawer-w: 290px;
-  --playerbar-h: 78px;
+  --playerbar-h: 108px;
 
   --font: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
 }
@@ -245,6 +245,7 @@ svg{ fill: currentColor; }
   grid-area: drawer;
   height: calc(100vh - var(--appbar-h) - var(--playerbar-h));
   overflow:auto;
+  scrollbar-gutter: stable;
   border-right: 1px solid var(--border);
   background: rgba(0,0,0,.10);
 }
@@ -305,6 +306,7 @@ svg{ fill: currentColor; }
   grid-area: content;
   height: calc(100vh - var(--appbar-h) - var(--playerbar-h));
   overflow:auto;
+  scrollbar-gutter: stable;
 }
 
 .split{
@@ -627,6 +629,7 @@ svg{ fill: currentColor; }
 
 .playerbar__meta{ min-width:0; }
 .playerbar__center{ display:flex; flex-direction:column; gap: 6px; }
+.playerbar__center{ padding-bottom: 4px; }
 .playerbar__controls{ display:flex; justify-content:center; gap: 10px; }
 
 .fab{
@@ -644,11 +647,49 @@ svg{ fill: currentColor; }
 
 .playerbar__progress{
   display:flex;
+  flex-direction:column;
+  gap:6px;
   align-items:center;
-  gap:10px;
+}
+.playerbar__progress input[type="range"]{ width: min(520px, 100%); }
+.playerbar__times{
+  display:flex;
+  justify-content:space-between;
+  width: min(520px, 100%);
 }
 .time{ font-size: 12px; }
 input[type="range"]{ accent-color: var(--accent); }
+
+.now__progress{
+  margin-top: 12px;
+  width: min(520px, 100%);
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.now__times{
+  display:flex;
+  justify-content:space-between;
+}
+
+/* Scrollbars */
+*{
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,.35) rgba(255,255,255,.08);
+}
+::-webkit-scrollbar{ width: 12px; height: 12px; }
+::-webkit-scrollbar-track{
+  background: rgba(255,255,255,.12);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb{
+  background: rgba(255,255,255,.75);
+  border-radius: 999px;
+  border: 2px solid rgba(0,0,0,.35);
+}
+::-webkit-scrollbar-thumb:hover{
+  background: rgba(255,255,255,.9);
+}
 
 .playerbar__right{ display:flex; justify-content:flex-end; gap: 6px; }
 
