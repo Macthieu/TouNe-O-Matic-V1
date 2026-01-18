@@ -418,6 +418,9 @@ export async function render(root){
   const srvCockpit = document.createElement("div");
   srvCockpit.className = "muted small";
   srvCockpit.textContent = "Cockpit: vérification…";
+  const srvPicard = document.createElement("div");
+  srvPicard.className = "muted small";
+  srvPicard.textContent = "Picard: vérification…";
   const srvActions = document.createElement("div");
   srvActions.style.display = "flex";
   srvActions.style.gap = "10px";
@@ -432,8 +435,14 @@ export async function render(root){
   btnCockpit.rel = "noopener";
   btnCockpit.textContent = "Ouvrir Cockpit";
   btnCockpit.href = `https://${window.location.hostname}:9090`;
-  srvActions.append(btnSrvRescan, btnSrvLogs, btnSrvInfo, btnCockpit);
-  srv.body.append(srvInfo, srvCockpit, srvActions);
+  const btnPicard = document.createElement("a");
+  btnPicard.className = "btn";
+  btnPicard.target = "_blank";
+  btnPicard.rel = "noopener";
+  btnPicard.textContent = "Ouvrir Picard";
+  btnPicard.href = `http://${window.location.hostname}:6080/vnc.html?autoconnect=1&resize=remote`;
+  srvActions.append(btnSrvRescan, btnSrvLogs, btnSrvInfo, btnCockpit, btnPicard);
+  srv.body.append(srvInfo, srvCockpit, srvPicard, srvActions);
   root.append(srv.root);
   root.append(cmdCard.root);
 
@@ -1210,10 +1219,15 @@ export async function render(root){
     URL.revokeObjectURL(url);
   }
 
-  async function refreshCockpitStatus(){
+  async function refreshServiceStatus(){
     if(AppConfig.transport !== "rest") return;
     try {
-      const res = await fetch(`${AppConfig.restBaseUrl}/services/status`);
+      const names = [
+        "cockpit.socket",
+        "cockpit.service",
+        "picard-web.service",
+      ];
+      const res = await fetch(`${AppConfig.restBaseUrl}/services/status?names=${names.join(",")}`);
       const body = await res.json();
       if(!body?.ok || !Array.isArray(body.data)) return;
       const items = body.data;
@@ -1234,8 +1248,26 @@ export async function render(root){
         srvCockpit.textContent = "Cockpit: non installé";
         btnCockpit.disabled = true;
       }
+
+      const picard = items.find((s)=>s.name === "picard-web.service");
+      if(!picard){
+        srvPicard.textContent = "Picard: non installé";
+        btnPicard.disabled = true;
+        return;
+      }
+      if(picard.installed && picard.active){
+        srvPicard.textContent = "Picard: installé (actif)";
+        btnPicard.disabled = false;
+      } else if(picard.installed){
+        srvPicard.textContent = "Picard: installé (inactif)";
+        btnPicard.disabled = false;
+      } else {
+        srvPicard.textContent = "Picard: non installé";
+        btnPicard.disabled = true;
+      }
     } catch {
       srvCockpit.textContent = "Cockpit: état inconnu";
+      srvPicard.textContent = "Picard: état inconnu";
     }
   }
 
@@ -1250,5 +1282,5 @@ export async function render(root){
   renderLogs(cmdLogBox, cmdLogPre, cmdLogs, false);
   libsData = await fetchLibraryRoots();
   renderLibraryRoots();
-  await refreshCockpitStatus();
+  await refreshServiceStatus();
 }

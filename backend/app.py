@@ -487,6 +487,41 @@ def _normalize_title_key(value: str) -> str:
     return text
 
 
+def _split_artist_primary(value: str) -> str:
+    if not value:
+        return ""
+    text = value.strip()
+    text = re.sub(
+        r"\s*\((?:feat\.?|featuring|ft\.?|avec|with)\b[^)]*\)\s*$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    parts = re.split(r"\s+(?:feat\.?|featuring|ft\.?|avec|with)\b", text, flags=re.IGNORECASE)
+    base = parts[0].strip(" -–—")
+    return base or text
+
+
+_ARTIST_SEP_RE = re.compile(r"(?:(?<=\s)|^)(?:&|et|and|x|×|\+)(?=(?:\s|$))", flags=re.IGNORECASE)
+
+
+def _display_artist_name(value: str) -> str:
+    base = _split_artist_primary(value)
+    if not base:
+        return value
+    text = _ARTIST_SEP_RE.sub(" & ", base)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or value
+
+
+def _normalize_artist_key(value: str) -> str:
+    base = _split_artist_primary(value)
+    key = _normalize_text_key(base)
+    key = _ARTIST_SEP_RE.sub(" & ", key)
+    key = re.sub(r"\s+", " ", key).strip()
+    return key
+
+
 def _parse_extinf(line: str) -> Tuple[str, str]:
     if not line.startswith("#EXTINF"):
         return "", ""
@@ -2801,17 +2836,21 @@ def library_summary():
     album_mtime: Dict[str, int] = {}
 
     for t in tracks:
-        artist = t.get("artist") or "Artiste inconnu"
-        albumartist = t.get("albumartist") or artist
+        raw_artist = t.get("artist") or "Artiste inconnu"
+        raw_albumartist = t.get("albumartist") or raw_artist
+        artist = _display_artist_name(raw_artist)
+        albumartist = _display_artist_name(raw_albumartist)
         album = t.get("album") or "Album inconnu"
         year = t.get("year") or 0
         genre = t.get("genre") or ""
         composer = t.get("composer") or ""
         work = t.get("work") or ""
 
-        artist_id = _make_id("artist", artist)
-        albumartist_id = _make_id("albumartist", albumartist)
-        album_id = _make_id("album", artist, album)
+        artist_key = _normalize_artist_key(raw_artist) or _normalize_text_key(artist)
+        albumartist_key = _normalize_artist_key(raw_albumartist) or _normalize_text_key(albumartist)
+        artist_id = _make_id("artist", artist_key or artist)
+        albumartist_id = _make_id("albumartist", albumartist_key or albumartist)
+        album_id = _make_id("album", artist_key or artist, album)
 
         if artist_id not in artists_map:
             artists_map[artist_id] = {"id": artist_id, "name": artist, "albums": []}
@@ -4160,3 +4199,6 @@ def _download_image(url: str, dest: Path) -> bool:
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=11000, debug=True)
+PICARD_WEB_SERVICE = os.environ.get("TOUNE_PICARD_WEB_SERVICE", "picard-web.service")
+PICARD_WEB_ENV = Path(os.environ.get("TOUNE_PICARD_WEB_ENV", "/etc/default/picard-web"))
+PICARD_WEB_URL = os.environ.get("TOUNE_PICARD_WEB_URL", "http://127.0.0.1:6080")
