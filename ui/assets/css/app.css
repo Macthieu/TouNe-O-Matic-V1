@@ -413,6 +413,10 @@ svg{ fill: currentColor; }
 .row__title{ font-size: 13px; font-weight: 650; }
 .row__sub{ font-size: 12px; margin-top: 2px; }
 .row__trail{ color: var(--muted); }
+.row__trail--latency{
+  min-width: 72px;
+  text-align: right;
+}
 .row--wide{
   grid-template-columns: 1fr auto;
 }

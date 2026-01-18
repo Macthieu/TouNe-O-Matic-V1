@@ -412,14 +412,28 @@ export async function render(root){
   root.append(libs.root);
 
   const srv = card({ title:"Serveur", subtitle:"Infos & maintenance (UI only)" });
-  srv.body.innerHTML = `
-    <div class="muted small">Plus tard : stats, rescan, logs, plugins, etc.</div>
-    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:12px">
-      <button class="btn">Rescan bibliothèque</button>
-      <button class="btn">Voir les logs</button>
-      <button class="btn">Infos système</button>
-    </div>
-  `;
+  const srvInfo = document.createElement("div");
+  srvInfo.className = "muted small";
+  srvInfo.textContent = "Plus tard : stats, rescan, logs, plugins, etc.";
+  const srvCockpit = document.createElement("div");
+  srvCockpit.className = "muted small";
+  srvCockpit.textContent = "Cockpit: vérification…";
+  const srvActions = document.createElement("div");
+  srvActions.style.display = "flex";
+  srvActions.style.gap = "10px";
+  srvActions.style.flexWrap = "wrap";
+  srvActions.style.marginTop = "12px";
+  const btnSrvRescan = button("Rescan bibliothèque");
+  const btnSrvLogs = button("Voir les logs");
+  const btnSrvInfo = button("Infos système");
+  const btnCockpit = document.createElement("a");
+  btnCockpit.className = "btn";
+  btnCockpit.target = "_blank";
+  btnCockpit.rel = "noopener";
+  btnCockpit.textContent = "Ouvrir Cockpit";
+  btnCockpit.href = `https://${window.location.hostname}:9090`;
+  srvActions.append(btnSrvRescan, btnSrvLogs, btnSrvInfo, btnCockpit);
+  srv.body.append(srvInfo, srvCockpit, srvActions);
   root.append(srv.root);
   root.append(cmdCard.root);
 
@@ -526,12 +540,16 @@ export async function render(root){
       clients.forEach((c)=>{
         const row = document.createElement("div");
         row.className = "row row--wide";
+        const name = c.name || c.host?.name || c.id || "Client";
+        const status = c.connected ? "en ligne" : "hors ligne";
+        const group = c.group || "Groupe";
         row.innerHTML = `
           <div class="row__main">
-            <div class="row__title wrap">${c.name || c.host?.name || c.id || "Client"}</div>
-            <div class="row__sub wrap muted small">Snapcast • ${c.connected ? "en ligne" : "hors ligne"} • ${c.group || "Groupe"}</div>
+            <div class="row__title wrap">${name}</div>
+            <div class="row__sub wrap muted small">Statut: ${status}</div>
+            <div class="row__sub wrap muted small">Groupe: ${group}</div>
           </div>
-          <div class="row__trail muted small">${c.latency ?? "—"} ms</div>
+          <div class="row__trail row__trail--latency muted small">${c.latency ?? "—"} ms</div>
         `;
         latencyList.append(row);
       });
@@ -1192,6 +1210,35 @@ export async function render(root){
     URL.revokeObjectURL(url);
   }
 
+  async function refreshCockpitStatus(){
+    if(AppConfig.transport !== "rest") return;
+    try {
+      const res = await fetch(`${AppConfig.restBaseUrl}/services/status`);
+      const body = await res.json();
+      if(!body?.ok || !Array.isArray(body.data)) return;
+      const items = body.data;
+      const cockpit = items.find((s)=>s.name === "cockpit.socket")
+        || items.find((s)=>s.name === "cockpit.service");
+      if(!cockpit){
+        srvCockpit.textContent = "Cockpit: non installé";
+        btnCockpit.disabled = true;
+        return;
+      }
+      if(cockpit.installed && cockpit.active){
+        srvCockpit.textContent = "Cockpit: installé (actif)";
+        btnCockpit.disabled = false;
+      } else if(cockpit.installed){
+        srvCockpit.textContent = "Cockpit: installé (inactif)";
+        btnCockpit.disabled = false;
+      } else {
+        srvCockpit.textContent = "Cockpit: non installé";
+        btnCockpit.disabled = true;
+      }
+    } catch {
+      srvCockpit.textContent = "Cockpit: état inconnu";
+    }
+  }
+
   await refreshStatus();
   await refreshDocsStatus();
   await refreshLatency();
@@ -1203,4 +1250,5 @@ export async function render(root){
   renderLogs(cmdLogBox, cmdLogPre, cmdLogs, false);
   libsData = await fetchLibraryRoots();
   renderLibraryRoots();
+  await refreshCockpitStatus();
 }
