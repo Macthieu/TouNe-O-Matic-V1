@@ -969,6 +969,87 @@ input.is-disabled{
 .btn.primary{ border-color: rgba(59,130,246,.35); background: rgba(59,130,246,.16); }
 .btn.danger{ border-color: rgba(255,77,77,.35); background: rgba(255,77,77,.14); }
 .pill{ padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border); background: rgba(255,255,255,.04); font-size: 12px; }
+.pill--soon{
+  border-color: rgba(59,130,246,.35);
+  background: rgba(59,130,246,.16);
+  color: #dbeafe;
+}
+
+.entry-form{
+  display:grid;
+  grid-template-columns: 1fr 1fr 1fr auto;
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+.entry-edit-list{
+  display:flex;
+  flex-direction:column;
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+.entry-edit{
+  display:grid;
+  grid-template-columns: 1fr 1fr 1fr auto auto;
+  gap: 8px;
+  align-items:center;
+}
+
+.signal-map{ display:flex; flex-direction:column; gap: 8px; }
+.signal-row{ display:flex; align-items:center; gap: 8px; flex-wrap:wrap; }
+.signal-node{
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,.04);
+  font-size: 12px;
+}
+.signal-arrow{ color: var(--muted); font-size: 12px; }
+.signal-sub{ color: var(--muted); font-size: 12px; }
+.input--file{ display:none; }
+
+.matrix{
+  display:flex;
+  flex-direction:column;
+  gap: 6px;
+  overflow-x:auto;
+}
+.matrix__head,
+.matrix__row{
+  display:grid;
+  grid-template-columns: 220px repeat(4, minmax(120px, 1fr));
+  gap: 6px;
+  align-items:center;
+}
+.matrix__cell{
+  padding: 6px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,.03);
+  font-size: 12px;
+}
+.matrix__cell--head{
+  font-weight: 650;
+  background: rgba(255,255,255,.06);
+}
+.matrix__cell--label{
+  font-weight: 650;
+  white-space: nowrap;
+}
+.matrix__toggle{
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,.04);
+  color: var(--text);
+  cursor:pointer;
+  font-size: 12px;
+}
+.matrix__toggle.is-on{
+  border-color: rgba(59,130,246,.45);
+  background: rgba(59,130,246,.18);
+  color: #dbeafe;
+}
 
 /* Responsive */
 @media (max-width: 1100px){
@@ -1012,6 +1093,15 @@ input.is-disabled{
     height: var(--playerbar-h);
   }
   .playerbar__right{ display:none; }
+}
+
+@media (max-width: 900px){
+  .entry-form{
+    grid-template-columns: 1fr;
+  }
+  .entry-edit{
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 520px){

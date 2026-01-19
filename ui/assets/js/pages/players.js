@@ -15,7 +15,7 @@ function iconEl(emoji, label){
 export async function render(root){
   const st = store.get();
 
-  const c = card({ title:"Appareils", subtitle:"Résumé" });
+  const c = card({ title:"Sorties", subtitle:"Résumé" });
 
   const top = document.createElement("div");
   top.style.display = "flex";
@@ -30,7 +30,7 @@ export async function render(root){
   const hint = document.createElement("div");
   hint.className = "muted small";
   hint.style.marginTop = "8px";
-  hint.textContent = "Sortie principale = mode exclusif. Console sorties = multi-sorties.";
+  hint.textContent = "Sortie principale = mode exclusif. Mixeur multi-sorties = sorties simultanées.";
   c.body.append(hint);
 
   root.append(c.root);
