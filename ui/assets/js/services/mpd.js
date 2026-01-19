@@ -211,9 +211,15 @@ export class MPDClient {
     const index = parseIndex(st, current, queue);
     const track = current ? toTrack(current) : (index >= 0 ? toTrack(queue[index]) : null);
 
+    const volumeRaw = Number(st.volume);
+    const hasMixer = Number.isFinite(volumeRaw) && volumeRaw >= 0;
+
     player.connected = true;
     player.state = st.state || "pause";
-    player.volume = Number.isFinite(Number(st.volume)) ? Number(st.volume) : player.volume;
+    player.canSetVolume = hasMixer;
+    if(hasMixer){
+      player.volume = volumeRaw;
+    }
     player.random = st.random === "1";
     player.repeat = parseRepeat(st);
     player.elapsed = elapsed;

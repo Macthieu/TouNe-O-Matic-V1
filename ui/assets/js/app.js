@@ -207,6 +207,7 @@ $("#btnTheme")?.addEventListener("click", ()=>{
 // Volume slider (appbar)
 const volRange = $("#volRange");
 volRange?.addEventListener("input", async ()=>{
+  if(store.get().player.canSetVolume === false) return;
   const v = Number(volRange.value || 0);
   await mpd.setVolume(v);
 });
@@ -338,6 +339,7 @@ $("#btnRepeat")?.addEventListener("click", async ()=>{
 
 // Volume quick control (simple)
 $("#btnVol")?.addEventListener("click", async ()=>{
+  if(store.get().player.canSetVolume === false) return;
   const cur = store.get().player.volume;
   const next = (cur >= 100) ? 0 : Math.min(100, cur + 10);
   await mpd.setVolume(next);
@@ -451,9 +453,23 @@ function renderPlayerBar(state){
     }
   }
 
+  const queueVol = (p.canSetVolume === false) ? "Bit-perfect" : `${p.volume}%`;
   // queue sheet
-  $("#queueSummary").textContent = `${p.queue.length} titres • ${p.name} • Vol ${p.volume}%`;
+  $("#queueSummary").textContent = `${p.queue.length} titres • ${p.name} • Vol ${queueVol}`;
   renderQueueSheet(p);
+
+  const volEnabled = p.connected !== false && p.canSetVolume !== false;
+  const volBtn = $("#btnVol");
+  if(volBtn){
+    volBtn.classList.toggle("is-disabled", !volEnabled);
+    if(volEnabled){
+      volBtn.removeAttribute("disabled");
+      volBtn.title = "Volume";
+    } else {
+      volBtn.setAttribute("disabled", "disabled");
+      volBtn.title = "Volume indisponible (bit-perfect)";
+    }
+  }
 }
 
 function albumArtUrl(track, size){
@@ -524,8 +540,23 @@ function renderHeader(p){
   const name = $("#playerName");
   if(name) name.textContent = p.name || "Lecteur";
   const pct = $("#volPct");
-  if(pct) pct.textContent = `${p.volume ?? 0}%`;
-  if(volRange && document.activeElement !== volRange) volRange.value = String(p.volume ?? 0);
+  const volEnabled = p.connected !== false && p.canSetVolume !== false;
+  if(pct) pct.textContent = volEnabled ? `${p.volume ?? 0}%` : "Bit-perfect";
+  if(volRange && document.activeElement !== volRange){
+    if(volEnabled){
+      volRange.value = String(p.volume ?? 0);
+    }
+  }
+  if(volRange){
+    volRange.classList.toggle("is-disabled", !volEnabled);
+    if(volEnabled){
+      volRange.removeAttribute("disabled");
+      volRange.title = "Volume";
+    } else {
+      volRange.setAttribute("disabled", "disabled");
+      volRange.title = "Volume indisponible (bit-perfect)";
+    }
+  }
 }
 
 function renderQueuePane(p){

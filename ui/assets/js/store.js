@@ -19,6 +19,7 @@ export const store = (() => {
       connected: false,
       name: "Meuble Stéréo TouNe-O-Matic",
       volume: 29,
+      canSetVolume: true,
       state: "pause", // "play" | "pause" | "stop"
       repeat: "off", // "off" | "one" | "all"
       random: false,

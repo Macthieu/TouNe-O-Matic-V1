@@ -55,6 +55,11 @@ AIRPLAY_SNAPCLIENT_SERVICE = os.environ.get("TOUNE_AIRPLAY_SNAPCLIENT_SERVICE", 
 BT_PULSE_SERVER = os.environ.get("TOUNE_BT_PULSE_SERVER", "unix:/var/run/pulse/native")
 BT_SNAPCLIENT_CONF = Path(os.environ.get("TOUNE_BT_SNAPCLIENT_CONF", "/etc/default/snapclient-bluetooth"))
 BT_SNAPCLIENT_SERVICE = os.environ.get("TOUNE_BT_SNAPCLIENT_SERVICE", "snapclient-bluetooth")
+BIT_PERFECT_OUTPUTS = [
+    s.strip().lower()
+    for s in os.environ.get("TOUNE_BITPERFECT_OUTPUTS", "innomaker,pcm5122,dac").split(",")
+    if s.strip()
+]
 PLAYLIST_PREFIXES = [
     "/mnt/libraries/music/",
     "/mnt/media/wd/Musique/",
@@ -963,6 +968,14 @@ def _snapcast_set_local_stream(stream_id: str) -> bool:
     return False
 
 
+def _snapcast_find_client(client_id: str) -> Optional[Dict[str, Any]]:
+    data = _snapcast_status()
+    for client in data.get("clients", []) or []:
+        if client.get("id") == client_id:
+            return client
+    return None
+
+
 def _service_status(name: str) -> Dict[str, Any]:
     status = {"name": name, "installed": False, "active": False, "enabled": False}
     try:
@@ -1335,6 +1348,55 @@ def mpd_status():
         return err("MPD unreachable", 503, detail=str(e))
     except CommandError as e:
         return err("MPD command error", 500, detail=str(e))
+
+
+@app.get("/api/mpd/outputs")
+def mpd_outputs():
+    try:
+        with mpd_client() as c:
+            outputs = c.outputs() or []
+            cleaned = []
+            for out in outputs:
+                out_id = out.get("outputid") or out.get("id")
+                name = out.get("outputname") or out.get("name") or "Sortie"
+                enabled_raw = out.get("outputenabled") or out.get("enabled") or "0"
+                enabled = str(enabled_raw).lower() in {"1", "true", "yes", "on"}
+                name_l = str(name).lower()
+                bit_perfect = any(tag in name_l for tag in BIT_PERFECT_OUTPUTS)
+                cleaned.append({
+                    "id": out_id,
+                    "name": name,
+                    "enabled": enabled,
+                    "bit_perfect": bit_perfect,
+                })
+            return ok({"outputs": cleaned})
+    except (MPDConnectionError, OSError) as e:
+        return err("MPD unreachable", 503, detail=str(e))
+    except CommandError as e:
+        return err("MPD command error", 500, detail=str(e))
+
+
+@app.post("/api/mpd/output")
+def mpd_output_set():
+    data = request.get_json(silent=True) or {}
+    out_id = data.get("id")
+    enabled = data.get("enabled")
+    if out_id is None or enabled is None:
+        return err("missing id/enabled")
+    enabled_flag = str(enabled).lower() in {"1", "true", "yes", "on"}
+    try:
+        out_id_val = int(out_id)
+    except (TypeError, ValueError):
+        out_id_val = str(out_id)
+    try:
+        with mpd_client() as c:
+            if enabled_flag:
+                c.enableoutput(out_id_val)
+            else:
+                c.disableoutput(out_id_val)
+            return ok()
+    except Exception as e:
+        return err("mpd output update failed", 500, detail=str(e))
 
 
 @app.post("/api/mpd/play")
@@ -1881,6 +1943,51 @@ def snapcast_status():
         return ok(data)
     except Exception as e:
         return err("snapcast status failed", 500, detail=str(e))
+
+
+@app.post("/api/snapcast/client/volume")
+def snapcast_client_volume():
+    data = request.get_json(silent=True) or {}
+    cid = (data.get("id") or "").strip()
+    if not cid:
+        return err("missing id")
+    try:
+        percent = int(float(data.get("percent")))
+    except Exception:
+        return err("missing percent")
+    percent = max(0, min(100, percent))
+    muted = data.get("muted")
+    if muted is None:
+        try:
+            cur = _snapcast_find_client(cid) or {}
+            muted = bool(cur.get("muted"))
+        except Exception:
+            muted = False
+    try:
+        _snapcast_rpc("Client.SetVolume", {"id": cid, "volume": {"percent": percent, "muted": bool(muted)}})
+        return ok()
+    except Exception as e:
+        return err("snapcast volume update failed", 500, detail=str(e))
+
+
+@app.post("/api/snapcast/client/mute")
+def snapcast_client_mute():
+    data = request.get_json(silent=True) or {}
+    cid = (data.get("id") or "").strip()
+    if not cid:
+        return err("missing id")
+    muted = data.get("muted")
+    if muted is None:
+        return err("missing muted")
+    try:
+        cur = _snapcast_find_client(cid) or {}
+        percent = cur.get("volume")
+        if percent is None:
+            percent = 0
+        _snapcast_rpc("Client.SetVolume", {"id": cid, "volume": {"percent": int(percent), "muted": bool(muted)}})
+        return ok()
+    except Exception as e:
+        return err("snapcast mute update failed", 500, detail=str(e))
 
 
 @app.post("/api/snapcast/stream")

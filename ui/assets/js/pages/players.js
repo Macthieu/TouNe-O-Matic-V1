@@ -4,10 +4,18 @@ import { toast } from "../utils.js";
 import { AppConfig } from "../config.js";
 import { renderRoute } from "../router.js";
 
+function iconEl(emoji, label){
+  const el = document.createElement("div");
+  el.className = "row__icon";
+  el.textContent = emoji;
+  if(label) el.setAttribute("aria-label", label);
+  return el;
+}
+
 export async function render(root){
   const st = store.get();
 
-  const c = card({ title:"Appareils", subtitle:"Sélection & volume" });
+  const c = card({ title:"Appareils", subtitle:"Résumé" });
 
   const top = document.createElement("div");
   top.style.display = "flex";
@@ -19,50 +27,211 @@ export async function render(root){
   );
 
   c.body.append(top);
+  const hint = document.createElement("div");
+  hint.className = "muted small";
+  hint.style.marginTop = "8px";
+  hint.textContent = "Sortie principale = mode exclusif. Console sorties = multi-sorties.";
+  c.body.append(hint);
 
-  const outputCard = card({ title:"Sorties audio", subtitle:"Changer la destination" });
+  root.append(c.root);
+
+  const outputCard = card({ title:"Sortie principale", subtitle:"Mode exclusif (désactive les autres sorties)" });
   const outputList = document.createElement("div");
   outputList.className = "list";
   outputList.style.marginTop = "10px";
   outputCard.body.append(outputList);
   root.append(outputCard.root);
 
-  const list = document.createElement("div");
-  list.className = "list";
-  list.style.marginTop = "12px";
-
   if(AppConfig.transport === "rest"){
     await renderOutputTargets(outputList);
-    await renderSnapcastDevices(list);
+    await renderOutputConsole(root);
   } else {
-    const devices = [
-      {name:"Meuble Stéréo TouNe-O-Matic", type:"MPD", online:true},
-      {name:"Salon", type:"MPD", online:true},
-      {name:"Atelier", type:"MPD", online:false},
-      {name:"Cuisine", type:"MPD", online:true},
-    ];
-    for(const d of devices){
-      list.append(listRow({
-        title: d.name,
-        subtitle: `${d.type} • ${d.online ? "en ligne" : "hors ligne"}`,
-        left: coverEl("sm", d.name),
-        right: button("Sélectionner", {onClick:(ev)=>{ev.stopPropagation(); toast("Démo : switch player plus tard.");}}),
-      }));
-    }
+    toast("Mode démo : console sorties indisponible.");
   }
-
-  c.body.append(list);
 
   const g = card({ title:"Groupes", subtitle:"Snapcast" });
   g.body.innerHTML = `
     <div class="muted">Aucun groupe.</div>
   `;
 
-  root.append(c.root, g.root);
+  root.append(g.root);
 
   if(AppConfig.transport === "rest"){
     await renderSnapcastGroups(g);
   }
+}
+
+async function renderOutputConsole(root){
+  const consoleCard = card({
+    title: "Mixeur multi-sorties",
+    subtitle: "Volumes par zone + sorties simultanées",
+  });
+  const list = document.createElement("div");
+  list.className = "list";
+  list.style.marginTop = "10px";
+  consoleCard.body.append(list);
+  root.append(consoleCard.root);
+
+  async function refresh(){
+    list.innerHTML = '<div class="muted">Chargement des sorties…</div>';
+    try {
+      const [mpdRes, snapRes] = await Promise.all([
+        fetchJson("/mpd/outputs").catch(()=>({outputs: []})),
+        fetchJson("/snapcast/status").catch(()=>({clients: []})),
+      ]);
+      const mpdOutputs = mpdRes.outputs || [];
+      const snapClients = snapRes.clients || [];
+      list.innerHTML = "";
+
+      const mpdLabel = document.createElement("div");
+      mpdLabel.className = "muted small";
+      mpdLabel.textContent = "MPD (sorties locales)";
+      list.append(mpdLabel);
+
+      if(!mpdOutputs.length){
+        list.append(listRow({
+          title: "Aucune sortie MPD",
+          subtitle: "Liste indisponible",
+          left: coverEl("sm", "mpd"),
+          right: button("OK", {onClick:null}),
+        }));
+      } else {
+        const mpdSorted = mpdOutputs.slice().sort((a, b)=>{
+          const aScore = a.bit_perfect ? 0 : 1;
+          const bScore = b.bit_perfect ? 0 : 1;
+          if(aScore !== bScore) return aScore - bScore;
+          return String(a.name || "").localeCompare(String(b.name || ""), "fr");
+        });
+        mpdSorted.forEach((out)=>{
+          const actions = document.createElement("div");
+          actions.className = "row__actions output__actions";
+
+          const isActive = !!out.enabled;
+          const toggle = button(isActive ? "Actif" : "Inactif", {
+            onClick: async (ev)=>{
+              ev.stopPropagation();
+              await setMpdOutput(out.id, !isActive);
+              await refresh();
+            }
+          });
+          actions.append(toggle);
+
+          const label = document.createElement("span");
+          label.className = "pill";
+          label.textContent = out.bit_perfect ? "Bit-perfect" : "Volume MPD (global)";
+          actions.append(label);
+
+          const subtitle = out.bit_perfect
+            ? (isActive ? "Meuble Stéréo (DAC analogique) • active" : "Meuble Stéréo (DAC analogique)")
+            : (isActive ? "Locale • active" : "Locale");
+          const icon = out.bit_perfect ? "🔌" : "🎛️";
+          list.append(listRow({
+            title: out.name || "Sortie MPD",
+            subtitle,
+            left: iconEl(icon, out.name || "Sortie MPD"),
+            right: actions,
+          }));
+        });
+      }
+
+      const snapLabel = document.createElement("div");
+      snapLabel.className = "muted small";
+      const onlineClients = snapClients.filter((c)=>c.connected);
+      const offlineCount = snapClients.length - onlineClients.length;
+      snapLabel.textContent = offlineCount > 0
+        ? `Snapcast (AirPlay/Bluetooth/Salles) • ${offlineCount} hors ligne`
+        : "Snapcast (AirPlay/Bluetooth/Salles)";
+      snapLabel.style.marginTop = "8px";
+      list.append(snapLabel);
+
+      if(!onlineClients.length){
+        list.append(listRow({
+          title: "Aucun client Snapcast en ligne",
+          subtitle: "Aucune sortie réseau active",
+          left: coverEl("sm", "snap"),
+          right: button("OK", {onClick:null}),
+        }));
+        return;
+      }
+
+      const snapSorted = onlineClients.slice().sort((a, b)=>{
+        const aName = String(a.name || a.host?.name || "").toLowerCase();
+        const bName = String(b.name || b.host?.name || "").toLowerCase();
+        const rank = (name)=>{
+          if(name.includes("beats")) return 0;
+          if(name.includes("airplay") || name.includes("raop") || name.includes("mac")) return 1;
+          if(name.includes("toune")) return 2;
+          return 3;
+        };
+        const aRank = rank(aName);
+        const bRank = rank(bName);
+        if(aRank !== bRank) return aRank - bRank;
+        return aName.localeCompare(bName, "fr");
+      });
+      snapSorted.forEach((client)=>{
+        const label = String(client.name || client.host?.name || "Client");
+        const name = label.toLowerCase();
+        const icon = name.includes("beats")
+          ? "🎧"
+          : (name.includes("airplay") || name.includes("raop") || name.includes("mac"))
+            ? "📡"
+            : (name.includes("toune") ? "🏠" : "🔊");
+        const actions = document.createElement("div");
+        actions.className = "row__actions output__actions";
+
+        const isMuted = !!client.muted;
+        const muteBtn = button(isMuted ? "Muet" : "Actif", {
+          onClick: async (ev)=>{
+            ev.stopPropagation();
+            await setSnapcastMute(client.id, !isMuted);
+            await refresh();
+          }
+        });
+        if(!client.connected){
+          muteBtn.setAttribute("disabled", "disabled");
+          muteBtn.classList.add("is-disabled");
+        }
+        actions.append(muteBtn);
+
+        const range = document.createElement("input");
+        range.type = "range";
+        range.min = "0";
+        range.max = "100";
+        range.value = String(client.volume ?? 0);
+        range.className = "output__range";
+        if(!client.connected || client.volume == null){
+          range.setAttribute("disabled", "disabled");
+          range.classList.add("is-disabled");
+        }
+
+        const pct = document.createElement("span");
+        pct.className = "output__pct muted small";
+        pct.textContent = `${client.volume ?? 0}%`;
+
+        range.addEventListener("input", ()=>{
+          pct.textContent = `${range.value}%`;
+          clearTimeout(range._t);
+          range._t = setTimeout(async ()=>{
+            await setSnapcastVolume(client.id, Number(range.value || 0));
+          }, 120);
+        });
+
+        actions.append(range, pct);
+
+        const subtitle = `Snapcast • ${client.connected ? "en ligne" : "hors ligne"}`;
+        list.append(listRow({
+          title: label,
+          subtitle,
+          left: iconEl(icon, label),
+          right: actions,
+        }));
+      });
+    } catch {
+      list.innerHTML = '<div class="muted">Sorties indisponibles.</div>';
+    }
+  }
+
+  await refresh();
 }
 
 async function renderOutputTargets(list){
@@ -82,8 +251,8 @@ async function renderOutputTargets(list){
 
     list.append(listRow({
       title: "Meuble Stéréo TouNe-O-Matic",
-      subtitle: active === "local" ? "Local • actif" : "Local",
-      left: coverEl("sm", "local"),
+      subtitle: active === "local" ? "DAC analogique • actif" : "DAC analogique",
+      left: iconEl("🔌", "DAC analogique"),
       right: button(active === "local" ? "Actif" : "Sélectionner", {
         disabled: active === "local",
         onClick: async (ev)=>{
@@ -98,7 +267,7 @@ async function renderOutputTargets(list){
       list.append(listRow({
         title: s.display || s.description || s.name,
         subtitle: isActive ? "AirPlay • actif" : "AirPlay",
-        left: coverEl("sm", s.display || s.description || s.name),
+        left: iconEl("📡", "AirPlay"),
         right: button(isActive ? "Actif" : "Sélectionner", {
           disabled: isActive,
           onClick: async (ev)=>{
@@ -114,11 +283,14 @@ async function renderOutputTargets(list){
       ? ""
       : ` • latence ${btLatency} ms`;
     (bt.sinks || []).forEach((s)=>{
+      const sinkName = String(s.name || "");
+      const sinkKind = sinkName.includes("handsfree") ? "HFP (mono)" : sinkName.includes("a2dp") ? "A2DP (stéréo)" : "";
+      const sinkSuffix = sinkKind ? ` • ${sinkKind}` : "";
       const isActive = active === "bluetooth" && bt.current === s.name;
       list.append(listRow({
         title: s.description || s.name,
-        subtitle: isActive ? `Bluetooth • actif${btLatencyLabel}` : `Bluetooth${btLatencyLabel}`,
-        left: coverEl("sm", s.description || s.name),
+        subtitle: isActive ? `Bluetooth • actif${btLatencyLabel}${sinkSuffix}` : `Bluetooth${btLatencyLabel}${sinkSuffix}`,
+        left: iconEl("🎧", "Bluetooth"),
         right: button(isActive ? "Actif" : "Sélectionner", {
           disabled: isActive,
           onClick: async (ev)=>{
@@ -182,6 +354,49 @@ async function outputSelect(type, target){
     }
   } catch {
     toast("Erreur sortie");
+  }
+}
+
+async function fetchJson(path, opts){
+  const res = await fetch(`${AppConfig.restBaseUrl}${path}`, opts);
+  const body = await res.json();
+  if(!body?.ok) throw new Error(body?.detail || body?.error || "API error");
+  return body.data;
+}
+
+async function setMpdOutput(id, enabled){
+  try {
+    await fetchJson("/mpd/output", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({id, enabled})
+    });
+  } catch {
+    toast("Erreur sortie MPD");
+  }
+}
+
+async function setSnapcastVolume(id, percent){
+  try {
+    await fetchJson("/snapcast/client/volume", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({id, percent})
+    });
+  } catch {
+    toast("Erreur volume Snapcast");
+  }
+}
+
+async function setSnapcastMute(id, muted){
+  try {
+    await fetchJson("/snapcast/client/mute", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({id, muted})
+    });
+  } catch {
+    toast("Erreur mute Snapcast");
   }
 }
 

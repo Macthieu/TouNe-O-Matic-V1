@@ -23,6 +23,12 @@ L'app utilise un routing par hash (`#/home`, `#/music`, `#/now`, etc.) donc aucu
 - `assets/js/pages/*` : pages (accueil, ma musique, artistes, albums, radio, favoris, playlists, apps, now playing, queue, players, settings, about)
 - `assets/js/services/mpd.js` : adaptateur MPD (mock) — à remplacer plus tard par REST/WS
 
+## Notes audio (Bluetooth)
+
+- Pour un son stéréo correct sur les casques Bluetooth, utiliser le profil A2DP (pas HFP).
+- Le sink A2DP ressemble à `bluez_sink.<MAC>.a2dp_sink` (stéréo) ; HFP est `handsfree_head_unit` (mono).
+- La latence se règle via `SNAPCLIENT_BLUETOOTH_LATENCY` dans `/etc/default/snapclient-bluetooth`.
+
 ## Branchement MPD (plus tard)
 
 Quand tu voudras brancher le vrai MPD, tu remplaceras l'implémentation mock dans `assets/js/services/mpd.js`
