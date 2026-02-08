@@ -44,6 +44,24 @@ Installer les services systemd:
 sudo ./scripts/install-services.sh
 ```
 
+Écran tactile local (kiosque Chromium):
+```bash
+sudo ./scripts/install-kiosk.sh
+```
+
+Options kiosque (`/etc/default/toune-kiosk`):
+- `TOUNE_KIOSK_URL=http://127.0.0.1:11000`
+- `TOUNE_KIOSK_OUTPUT=HDMI-1` (ou `HDMI-2`)
+- `TOUNE_KIOSK_ROTATE=normal` (`left`, `right`, `inverted`)
+- `TOUNE_TOUCH_DEVICE_HINT=HID 27c0:0818`
+
+Contrôles utiles:
+```bash
+systemctl status toune-kiosk
+journalctl -u toune-kiosk -n 120 --no-pager
+sudo systemctl restart toune-kiosk
+```
+
 Smoke test API:
 ```bash
 ./scripts/smoke-api.sh

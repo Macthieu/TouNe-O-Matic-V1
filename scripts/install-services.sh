@@ -18,3 +18,6 @@ systemctl enable --now toune-api.service toune-daemon.service toune-library-sync
 
 echo "Services installed and started:"
 systemctl --no-pager --full status toune-api.service toune-daemon.service toune-library-sync.timer | sed -n '1,120p'
+echo
+echo "Optional touchscreen kiosk:"
+echo "  sudo ./scripts/install-kiosk.sh"

@@ -4,6 +4,8 @@ import { toast } from "../utils.js";
 import { AppConfig } from "../config.js";
 import { renderRoute } from "../router.js";
 
+const OUTPUT_VIEW_KEY = "toune.outputs.view";
+
 function iconEl(emoji, label){
   const el = document.createElement("div");
   el.className = "row__icon";
@@ -12,63 +14,110 @@ function iconEl(emoji, label){
   return el;
 }
 
+function getOutputViewMode(){
+  try {
+    const hash = String(window.location.hash || "");
+    const qs = hash.includes("?") ? hash.split("?")[1] : "";
+    const forced = String(new URLSearchParams(qs).get("view") || "").toLowerCase();
+    if(forced === "advanced" || forced === "simple"){
+      localStorage.setItem(OUTPUT_VIEW_KEY, forced);
+      return forced;
+    }
+  } catch {
+    // ignore invalid hash/query
+  }
+  const raw = String(localStorage.getItem(OUTPUT_VIEW_KEY) || "simple").toLowerCase();
+  return raw === "advanced" ? "advanced" : "simple";
+}
+
+function setOutputViewMode(mode){
+  const safe = mode === "advanced" ? "advanced" : "simple";
+  localStorage.setItem(OUTPUT_VIEW_KEY, safe);
+}
+
 export async function render(root){
   const st = store.get();
+  const viewMode = getOutputViewMode();
 
-  const c = card({ title:"Sorties", subtitle:"Résumé" });
+  const c = card({
+    title:"Sorties",
+    subtitle: viewMode === "advanced" ? "Vue avancée" : "Vue simplifiée",
+  });
 
   const top = document.createElement("div");
-  top.style.display = "flex";
-  top.style.flexWrap = "wrap";
-  top.style.gap = "10px";
+  top.className = "outputs__summary";
   top.append(
     pill(`Actif : ${st.player.name}`),
     pill(`Volume : ${st.player.volume}%`),
+    pill(`Vue : ${viewMode === "advanced" ? "Avancée" : "Simple"}`),
   );
 
   c.body.append(top);
+  const modeBar = document.createElement("div");
+  modeBar.className = "rowbar outputs__modebar";
+  const simpleBtn = button("Simple", {
+    kind: viewMode === "simple" ? "primary" : "default",
+    onClick: async ()=>{
+      if(getOutputViewMode() === "simple") return;
+      setOutputViewMode("simple");
+      await renderRoute();
+    },
+  });
+  const advancedBtn = button("Avancé", {
+    kind: viewMode === "advanced" ? "primary" : "default",
+    onClick: async ()=>{
+      if(getOutputViewMode() === "advanced") return;
+      setOutputViewMode("advanced");
+      await renderRoute();
+    },
+  });
+  if(viewMode === "simple"){
+    simpleBtn.setAttribute("disabled", "disabled");
+    simpleBtn.classList.add("is-disabled");
+  } else {
+    advancedBtn.setAttribute("disabled", "disabled");
+    advancedBtn.classList.add("is-disabled");
+  }
+  modeBar.append(simpleBtn, advancedBtn);
+  c.body.append(modeBar);
+
   const hint = document.createElement("div");
-  hint.className = "muted small";
-  hint.style.marginTop = "8px";
-  hint.textContent = "Sortie principale = mode exclusif. Mixeur multi-sorties = sorties simultanées.";
+  hint.className = "muted small output__hint";
+  hint.textContent = viewMode === "advanced"
+    ? "Sortie principale + mixeur détaillé (MPD/Snapcast)."
+    : "Mode simple : uniquement les commandes essentielles.";
   c.body.append(hint);
 
   root.append(c.root);
 
-  const outputCard = card({ title:"Sortie principale", subtitle:"Mode exclusif (désactive les autres sorties)" });
+  const outputCard = card({
+    title:"Sortie principale",
+    subtitle: viewMode === "advanced"
+      ? "Mode exclusif (désactive les autres sorties)"
+      : "Mode exclusif simplifié",
+  });
   const outputList = document.createElement("div");
-  outputList.className = "list";
-  outputList.style.marginTop = "10px";
+  outputList.className = "list outputs__list";
   outputCard.body.append(outputList);
   root.append(outputCard.root);
 
   if(AppConfig.transport === "rest"){
-    await renderOutputTargets(outputList);
-    await renderOutputConsole(root);
+    await renderOutputTargets(outputList, viewMode);
+    await renderOutputConsole(root, viewMode);
   } else {
     toast("Mode démo : console sorties indisponible.");
   }
-
-  const g = card({ title:"Groupes", subtitle:"Snapcast" });
-  g.body.innerHTML = `
-    <div class="muted">Aucun groupe.</div>
-  `;
-
-  root.append(g.root);
-
-  if(AppConfig.transport === "rest"){
-    await renderSnapcastGroups(g);
-  }
 }
 
-async function renderOutputConsole(root){
+async function renderOutputConsole(root, viewMode = "simple"){
   const consoleCard = card({
-    title: "Mixeur multi-sorties",
-    subtitle: "Volumes par zone + sorties simultanées",
+    title: viewMode === "advanced" ? "Mixeur multi-sorties" : "Sorties locales",
+    subtitle: viewMode === "advanced"
+      ? "Volumes par zone + sorties simultanées"
+      : "Activer/désactiver les sorties DAC locales",
   });
   const list = document.createElement("div");
-  list.className = "list";
-  list.style.marginTop = "10px";
+  list.className = "list outputs__list";
   consoleCard.body.append(list);
   root.append(consoleCard.root);
 
@@ -77,28 +126,23 @@ async function renderOutputConsole(root){
     try {
       const [mpdRes, snapRes] = await Promise.all([
         fetchJson("/mpd/outputs").catch(()=>({outputs: []})),
-        fetchJson("/snapcast/status").catch(()=>({clients: []})),
+        fetchJson("/snapcast/status").catch(()=>({clients: [], groups: []})),
       ]);
       const mpdOutputs = mpdRes.outputs || [];
       const snapClients = snapRes.clients || [];
+      const snapGroups = snapRes.groups || [];
       list.innerHTML = "";
 
-      const mpdLabel = document.createElement("div");
-      mpdLabel.className = "muted small";
-      mpdLabel.textContent = "MPD (sorties locales)";
-      list.append(mpdLabel);
+      if(viewMode === "advanced"){
+        appendSectionTitle(list, "Sorties locales (MPD)");
+      }
 
       if(!mpdOutputs.length){
-        list.append(listRow({
-          title: "Aucune sortie MPD",
-          subtitle: "Liste indisponible",
-          left: coverEl("sm", "mpd"),
-          right: button("OK", {onClick:null}),
-        }));
+        appendSectionEmpty(list, "Aucune sortie locale détectée.");
       } else {
         const mpdSorted = mpdOutputs.slice().sort((a, b)=>{
-          const aScore = a.bit_perfect ? 0 : 1;
-          const bScore = b.bit_perfect ? 0 : 1;
+          const aScore = (a.enabled ? 0 : 2) + (a.bit_perfect ? 0 : 1);
+          const bScore = (b.enabled ? 0 : 2) + (b.bit_perfect ? 0 : 1);
           if(aScore !== bScore) return aScore - bScore;
           return String(a.name || "").localeCompare(String(b.name || ""), "fr");
         });
@@ -122,110 +166,121 @@ async function renderOutputConsole(root){
           actions.append(label);
 
           const subtitle = out.bit_perfect
-            ? (isActive ? "Meuble Stéréo (DAC analogique) • active" : "Meuble Stéréo (DAC analogique)")
-            : (isActive ? "Locale • active" : "Locale");
+            ? (isActive ? "DAC analogique • active" : "DAC analogique")
+            : (isActive ? "Sortie locale • active" : "Sortie locale");
           const icon = out.bit_perfect ? "🔌" : "🎛️";
-          list.append(listRow({
+          const row = listRow({
             title: out.name || "Sortie MPD",
             subtitle,
             left: iconEl(icon, out.name || "Sortie MPD"),
             right: actions,
-          }));
+          });
+          row.classList.add("row--output");
+          list.append(row);
         });
       }
 
-      const snapLabel = document.createElement("div");
-      snapLabel.className = "muted small";
-      const onlineClients = snapClients.filter((c)=>c.connected);
-      const offlineCount = snapClients.length - onlineClients.length;
-      snapLabel.textContent = offlineCount > 0
-        ? `Snapcast (AirPlay/Bluetooth/Salles) • ${offlineCount} hors ligne`
-        : "Snapcast (AirPlay/Bluetooth/Salles)";
-      snapLabel.style.marginTop = "8px";
-      list.append(snapLabel);
-
-      if(!onlineClients.length){
-        list.append(listRow({
-          title: "Aucun client Snapcast en ligne",
-          subtitle: "Aucune sortie réseau active",
-          left: coverEl("sm", "snap"),
-          right: button("OK", {onClick:null}),
-        }));
+      if(viewMode !== "advanced"){
         return;
       }
 
-      const snapSorted = onlineClients.slice().sort((a, b)=>{
-        const aName = String(a.name || a.host?.name || "").toLowerCase();
-        const bName = String(b.name || b.host?.name || "").toLowerCase();
-        const rank = (name)=>{
-          if(name.includes("beats")) return 0;
-          if(name.includes("airplay") || name.includes("raop") || name.includes("mac")) return 1;
-          if(name.includes("toune")) return 2;
-          return 3;
-        };
-        const aRank = rank(aName);
-        const bRank = rank(bName);
-        if(aRank !== bRank) return aRank - bRank;
-        return aName.localeCompare(bName, "fr");
-      });
-      snapSorted.forEach((client)=>{
-        const label = String(client.name || client.host?.name || "Client");
-        const name = label.toLowerCase();
-        const icon = name.includes("beats")
-          ? "🎧"
-          : (name.includes("airplay") || name.includes("raop") || name.includes("mac"))
-            ? "📡"
-            : (name.includes("toune") ? "🏠" : "🔊");
-        const actions = document.createElement("div");
-        actions.className = "row__actions output__actions";
+      const snapLabel = document.createElement("div");
+      snapLabel.className = "output__section-title";
+      const onlineClients = snapClients.filter((c)=>c.connected);
+      const offlineCount = snapClients.length - onlineClients.length;
+      snapLabel.textContent = offlineCount > 0
+        ? `Sorties réseau (Snapcast) • ${offlineCount} hors ligne`
+        : "Sorties réseau (Snapcast)";
+      list.append(snapLabel);
 
-        const isMuted = !!client.muted;
-        const muteBtn = button(isMuted ? "Muet" : "Actif", {
-          onClick: async (ev)=>{
-            ev.stopPropagation();
-            await setSnapcastMute(client.id, !isMuted);
-            await refresh();
+      if(!onlineClients.length){
+        appendSectionEmpty(list, "Aucune sortie réseau active.");
+      } else {
+        const snapSorted = onlineClients.slice().sort((a, b)=>{
+          const aName = String(a.name || a.host?.name || "").toLowerCase();
+          const bName = String(b.name || b.host?.name || "").toLowerCase();
+          const rank = (name)=>{
+            if(name.includes("beats")) return 0;
+            if(name.includes("airplay") || name.includes("raop") || name.includes("mac")) return 1;
+            if(name.includes("toune")) return 2;
+            return 3;
+          };
+          const aRank = rank(aName);
+          const bRank = rank(bName);
+          if(aRank !== bRank) return aRank - bRank;
+          return aName.localeCompare(bName, "fr");
+        });
+        snapSorted.forEach((client)=>{
+          const label = String(client.name || client.host?.name || "Client");
+          const name = label.toLowerCase();
+          const icon = name.includes("beats")
+            ? "🎧"
+            : (name.includes("airplay") || name.includes("raop") || name.includes("mac"))
+              ? "📡"
+              : (name.includes("toune") ? "🏠" : "🔊");
+          const actions = document.createElement("div");
+          actions.className = "row__actions output__actions";
+
+          const isMuted = !!client.muted;
+          const muteBtn = button(isMuted ? "Muet" : "Actif", {
+            onClick: async (ev)=>{
+              ev.stopPropagation();
+              await setSnapcastMute(client.id, !isMuted);
+              await refresh();
+            }
+          });
+          if(!client.connected){
+            muteBtn.setAttribute("disabled", "disabled");
+            muteBtn.classList.add("is-disabled");
           }
+          actions.append(muteBtn);
+
+          const range = document.createElement("input");
+          range.type = "range";
+          range.min = "0";
+          range.max = "100";
+          range.value = String(client.volume ?? 0);
+          range.className = "output__range";
+          if(!client.connected || client.volume == null){
+            range.setAttribute("disabled", "disabled");
+            range.classList.add("is-disabled");
+          }
+
+          const pct = document.createElement("span");
+          pct.className = "output__pct muted small";
+          pct.textContent = `${client.volume ?? 0}%`;
+
+          range.addEventListener("input", ()=>{
+            pct.textContent = `${range.value}%`;
+            clearTimeout(range._t);
+            range._t = setTimeout(async ()=>{
+              await setSnapcastVolume(client.id, Number(range.value || 0));
+            }, 120);
+          });
+
+          actions.append(range, pct);
+
+          const subtitle = `Snapcast • ${client.connected ? "en ligne" : "hors ligne"}`;
+          const row = listRow({
+            title: label,
+            subtitle,
+            left: iconEl(icon, label),
+            right: actions,
+          });
+          row.classList.add("row--output");
+          list.append(row);
         });
-        if(!client.connected){
-          muteBtn.setAttribute("disabled", "disabled");
-          muteBtn.classList.add("is-disabled");
-        }
-        actions.append(muteBtn);
+      }
 
-        const range = document.createElement("input");
-        range.type = "range";
-        range.min = "0";
-        range.max = "100";
-        range.value = String(client.volume ?? 0);
-        range.className = "output__range";
-        if(!client.connected || client.volume == null){
-          range.setAttribute("disabled", "disabled");
-          range.classList.add("is-disabled");
-        }
-
-        const pct = document.createElement("span");
-        pct.className = "output__pct muted small";
-        pct.textContent = `${client.volume ?? 0}%`;
-
-        range.addEventListener("input", ()=>{
-          pct.textContent = `${range.value}%`;
-          clearTimeout(range._t);
-          range._t = setTimeout(async ()=>{
-            await setSnapcastVolume(client.id, Number(range.value || 0));
-          }, 120);
+      if(snapGroups.length){
+        appendSectionTitle(list, "Groupes Snapcast");
+        const line = document.createElement("div");
+        line.className = "chips output__groups";
+        snapGroups.forEach((g)=>{
+          line.append(pill(`${g.name} • ${g.clients?.length || 0}`));
         });
-
-        actions.append(range, pct);
-
-        const subtitle = `Snapcast • ${client.connected ? "en ligne" : "hors ligne"}`;
-        list.append(listRow({
-          title: label,
-          subtitle,
-          left: iconEl(icon, label),
-          right: actions,
-        }));
-      });
+        list.append(line);
+      }
     } catch {
       list.innerHTML = '<div class="muted">Sorties indisponibles.</div>';
     }
@@ -234,7 +289,7 @@ async function renderOutputConsole(root){
   await refresh();
 }
 
-async function renderOutputTargets(list){
+async function renderOutputTargets(list, viewMode = "simple"){
   list.innerHTML = '<div class="muted">Chargement des sorties…</div>';
   try {
     const [airplayRes, btRes] = await Promise.all([
@@ -249,7 +304,7 @@ async function renderOutputTargets(list){
 
     const airplaySinks = normalizeAirplaySinks(airplay.sinks || [], airplay.current);
 
-    list.append(listRow({
+    const localRow = listRow({
       title: "Meuble Stéréo TouNe-O-Matic",
       subtitle: active === "local" ? "DAC analogique • actif" : "DAC analogique",
       left: iconEl("🔌", "DAC analogique"),
@@ -260,11 +315,17 @@ async function renderOutputTargets(list){
           await outputSelect("local");
         }
       }),
-    }));
+    });
+    localRow.classList.add("row--output");
+    list.append(localRow);
+
+    if(viewMode !== "advanced"){
+      return;
+    }
 
     airplaySinks.forEach((s)=>{
       const isActive = active === "airplay" && airplay.current === s.name;
-      list.append(listRow({
+      const row = listRow({
         title: s.display || s.description || s.name,
         subtitle: isActive ? "AirPlay • actif" : "AirPlay",
         left: iconEl("📡", "AirPlay"),
@@ -275,7 +336,9 @@ async function renderOutputTargets(list){
             await outputSelect("airplay", s.name);
           }
         }),
-      }));
+      });
+      row.classList.add("row--output");
+      list.append(row);
     });
 
     const btLatency = Number(bt.latency_ms);
@@ -287,7 +350,7 @@ async function renderOutputTargets(list){
       const sinkKind = sinkName.includes("handsfree") ? "HFP (mono)" : sinkName.includes("a2dp") ? "A2DP (stéréo)" : "";
       const sinkSuffix = sinkKind ? ` • ${sinkKind}` : "";
       const isActive = active === "bluetooth" && bt.current === s.name;
-      list.append(listRow({
+      const row = listRow({
         title: s.description || s.name,
         subtitle: isActive ? `Bluetooth • actif${btLatencyLabel}${sinkSuffix}` : `Bluetooth${btLatencyLabel}${sinkSuffix}`,
         left: iconEl("🎧", "Bluetooth"),
@@ -298,20 +361,34 @@ async function renderOutputTargets(list){
             await outputSelect("bluetooth", s.name);
           }
         }),
-      }));
+      });
+      row.classList.add("row--output");
+      list.append(row);
     });
 
     if(!airplaySinks.length && !bt.sinks?.length){
-      list.append(listRow({
-        title: "Aucune sortie distante",
-        subtitle: "AirPlay/Bluetooth non détectés",
-        left: coverEl("sm", "output"),
-        right: button("OK", {disabled: true}),
-      }));
+      const msg = document.createElement("div");
+      msg.className = "muted small output__empty";
+      msg.textContent = "Aucune sortie distante détectée (AirPlay/Bluetooth).";
+      list.append(msg);
     }
   } catch {
     list.innerHTML = '<div class="muted">Sorties audio indisponibles.</div>';
   }
+}
+
+function appendSectionTitle(parent, text){
+  const el = document.createElement("div");
+  el.className = "output__section-title";
+  el.textContent = text;
+  parent.append(el);
+}
+
+function appendSectionEmpty(parent, text){
+  const el = document.createElement("div");
+  el.className = "muted small output__empty";
+  el.textContent = text;
+  parent.append(el);
 }
 
 function normalizeAirplaySinks(sinks, current){

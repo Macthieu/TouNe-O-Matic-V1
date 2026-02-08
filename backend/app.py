@@ -73,6 +73,20 @@ PLAYLIST_PREFIXES = [
     "/mnt/media/wd/Musique/",
     "/mnt/librairies/music/",  # typo seen in imported playlists
 ]
+IGNORED_MEDIA_BASENAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
+IGNORED_MEDIA_DIRS = {".AppleDouble", "@eaDir"}
+ALBUM_ART_FILENAMES = (
+    "cover.jpg",
+    "cover.jpeg",
+    "cover.png",
+    "folder.jpg",
+    "folder.jpeg",
+    "folder.png",
+    "front.jpg",
+    "front.jpeg",
+    "front.png",
+)
+UNKNOWN_ARTIST_LABELS = {"artiste inconnu", "unknown artist"}
 
 SCAN_STATE = {
     "running": False,
@@ -133,6 +147,26 @@ def err(message: str, code: int = 400, **extra):
     payload = {"ok": False, "error": message}
     payload.update(extra)
     return jsonify(payload), code
+
+
+def _no_cache(resp):
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
+
+
+def _ui_version() -> str:
+    files = [
+        UI_ROOT / "index.html",
+        UI_ROOT / "assets" / "css" / "app.css",
+        UI_ROOT / "assets" / "js" / "app.js",
+        UI_ROOT / "assets" / "js" / "pages" / "players.js",
+    ]
+    stamps = [int(p.stat().st_mtime) for p in files if p.exists()]
+    if not stamps:
+        return str(int(time.time()))
+    return str(max(stamps))
 
 
 def _db_connect():
@@ -338,6 +372,23 @@ def _normalize_playlist_path(raw: str) -> Tuple[Optional[str], str]:
                 return raw[len(pref):], "absolute"
         return None, "outside"
     return raw, "relative"
+
+
+def _is_ignored_media_path(rel_path: str) -> bool:
+    if not rel_path:
+        return True
+    parts = [p for p in str(rel_path).replace("\\", "/").split("/") if p]
+    if not parts:
+        return True
+    base = parts[-1]
+    if base in IGNORED_MEDIA_BASENAMES:
+        return True
+    if base.startswith("._"):
+        return True
+    for p in parts:
+        if p in IGNORED_MEDIA_DIRS or p.startswith("._"):
+            return True
+    return False
 
 
 def _strip_bom(line: str) -> str:
@@ -1323,6 +1374,42 @@ def _safe_name(name: str) -> str:
     return name.replace("/", " - ").replace("\\", " - ").strip()
 
 
+def _is_unknown_artist(name: str) -> bool:
+    return _normalize_text_key(name or "") in UNKNOWN_ARTIST_LABELS
+
+
+def _guess_artist_from_path(rel_path: str) -> Optional[str]:
+    try:
+        parts = [p.strip() for p in Path(rel_path).parts if p and p not in (".", "..")]
+    except Exception:
+        return None
+    if len(parts) < 2:
+        return None
+    candidates: List[str] = []
+    if len(parts) >= 3:
+        candidates.append(parts[0])
+    if len(parts) >= 4 and _normalize_text_key(parts[0]) in {"artists", "artistes", "music", "musique"}:
+        candidates.append(parts[1])
+    skip = {
+        "albums",
+        "artists",
+        "artistes",
+        "compilations",
+        "lossless",
+        "lossy",
+        "music",
+        "musique",
+        "singles",
+        "various artists",
+        "v.a.",
+    }
+    for candidate in candidates:
+        key = _normalize_text_key(candidate)
+        if key and key not in skip:
+            return candidate
+    return None
+
+
 def _simplify_artist_name(name: str) -> str:
     lowered = name.lower()
     for token in [" feat.", " featuring ", " ft.", " & ", " / ", " x "]:
@@ -1421,12 +1508,22 @@ def _scan_library_worker():
                 raise e
         if items is None:
             items = []
-        files = [i for i in items if "file" in i]
+        files = [
+            i for i in items
+            if "file" in i and not _is_ignored_media_path(str(i.get("file") or ""))
+        ]
         SCAN_STATE["total"] = len(files)
 
         with _db_session() as conn:
-            cur = conn.execute("SELECT path, mtime FROM track")
-            existing = {row["path"]: row["mtime"] for row in cur.fetchall()}
+            cur = conn.execute("SELECT path, mtime, artist, albumartist FROM track")
+            existing = {
+                row["path"]: {
+                    "mtime": row["mtime"],
+                    "artist": row["artist"],
+                    "albumartist": row["albumartist"],
+                }
+                for row in cur.fetchall()
+            }
             seen = set()
 
             for item in files:
@@ -1442,7 +1539,12 @@ def _scan_library_worker():
                 except Exception:
                     mtime = None
 
-                if mtime is not None and existing.get(rel_path) == mtime:
+                existing_row = existing.get(rel_path)
+                existing_mtime = existing_row.get("mtime") if existing_row else None
+                existing_has_artist = False
+                if existing_row:
+                    existing_has_artist = bool((existing_row.get("artist") or "").strip() or (existing_row.get("albumartist") or "").strip())
+                if mtime is not None and existing_mtime == mtime and existing_has_artist:
                     SCAN_STATE["done"] += 1
                     continue
 
@@ -1450,6 +1552,15 @@ def _scan_library_worker():
                 artist = _normalize_tag(_tag(item, "artist", "Artist"))
                 album = _normalize_tag(_tag(item, "album", "Album"))
                 albumartist = _normalize_tag(_tag(item, "albumartist", "AlbumArtist"))
+                guessed_artist = _guess_artist_from_path(rel_path)
+                if not artist and albumartist:
+                    artist = albumartist
+                if not albumartist and artist:
+                    albumartist = artist
+                if not artist and guessed_artist:
+                    artist = guessed_artist
+                if not albumartist and guessed_artist:
+                    albumartist = guessed_artist
                 track_no = _parse_track_no(_tag(item, "track", "Track"))
                 disc_no = _parse_track_no(_tag(item, "disc", "Disc"))
                 duration = float(_tag(item, "time", "Time") or 0) or None
@@ -1530,7 +1641,7 @@ def ui_index():
     p = UI_ROOT / "index.html"
     if not p.exists():
         return err("ui not found", 404, path=str(p))
-    return send_file(p)
+    return _no_cache(make_response(send_file(p)))
 
 
 @app.get("/assets/<path:asset_path>")
@@ -1538,7 +1649,12 @@ def ui_assets(asset_path: str):
     p = UI_ROOT / "assets" / asset_path
     if not p.exists() or not p.is_file():
         return err("asset not found", 404, path=str(p))
-    return send_file(p)
+    return _no_cache(make_response(send_file(p)))
+
+
+@app.get("/api/ui/version")
+def ui_version():
+    return ok({"version": _ui_version()})
 
 
 @app.get("/api/mpd/status")
@@ -3817,14 +3933,15 @@ def docs_album_art():
     if docs_cover:
         size = request.args.get("size")
         return _serve_image(docs_cover, int(size) if size else None)
-    album_dir = MUSIC_ROOT / artist / album
-    if not album_dir.exists():
-        return err("album folder not found", 404)
-    for name in ("cover.jpg", "folder.jpg", "cover.png", "folder.png"):
-        p = album_dir / name
-        if p.exists():
-            size = request.args.get("size")
-            return _serve_image(p, int(size) if size else None)
+    track_path = _pick_album_track_path(artist, album)
+    local_cover = _find_local_album_cover(artist, album, track_path=track_path)
+    if local_cover:
+        size = request.args.get("size")
+        return _serve_image(local_cover, int(size) if size else None)
+    cache_cover = DOCS_ROOT / "Pochettes" / f"{_safe_name(album)}.jpg"
+    if track_path and _save_embedded_cover(track_path, cache_cover):
+        size = request.args.get("size")
+        return _serve_image(cache_cover, int(size) if size else None)
     return err("art not found", 404)
 
 
@@ -3891,6 +4008,150 @@ def _find_doc_file(folder: Path, name: str, exts: List[str]) -> Optional[Path]:
     return None
 
 
+def _pick_album_track_path(artist: str, album: str) -> Optional[str]:
+    artist = (artist or "").strip()
+    album = (album or "").strip()
+    if not album:
+        return None
+    try:
+        with _db_session() as conn:
+            row = None
+            if artist and not _is_unknown_artist(artist):
+                row = conn.execute(
+                    """
+                    SELECT path
+                    FROM track
+                    WHERE album = ?
+                      AND LOWER(COALESCE(NULLIF(artist, ''), NULLIF(albumartist, ''), '')) = LOWER(?)
+                    ORDER BY COALESCE(disc_no, 0), COALESCE(track_no, 0), path
+                    LIMIT 1
+                    """,
+                    (album, artist),
+                ).fetchone()
+            if not row:
+                row = conn.execute(
+                    """
+                    SELECT path
+                    FROM track
+                    WHERE album = ?
+                    ORDER BY COALESCE(disc_no, 0), COALESCE(track_no, 0), path
+                    LIMIT 1
+                    """,
+                    (album,),
+                ).fetchone()
+        if row and row["path"]:
+            return str(row["path"])
+    except Exception:
+        return None
+    return None
+
+
+def _iter_album_dirs(artist: str, album: str, track_path: Optional[str] = None) -> List[Path]:
+    out: List[Path] = []
+    seen: set[str] = set()
+
+    def _add(path: Path):
+        try:
+            key = str(path.resolve())
+        except Exception:
+            key = str(path)
+        if key in seen:
+            return
+        seen.add(key)
+        if path.exists() and path.is_dir():
+            out.append(path)
+
+    artist = (artist or "").strip()
+    album = (album or "").strip()
+    if artist and album and not _is_unknown_artist(artist):
+        _add(MUSIC_ROOT / artist / album)
+
+    if track_path:
+        track_abs = MUSIC_ROOT / track_path
+        _add(track_abs.parent)
+    return out
+
+
+def _find_local_album_cover(artist: str, album: str, track_path: Optional[str] = None) -> Optional[Path]:
+    for album_dir in _iter_album_dirs(artist, album, track_path=track_path):
+        for filename in ALBUM_ART_FILENAMES:
+            p = album_dir / filename
+            if p.exists() and p.is_file():
+                return p
+    return None
+
+
+def _save_image_bytes(data: bytes, dest: Path) -> bool:
+    if not data:
+        return False
+    try:
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(".tmp.jpg")
+        img.save(tmp, "JPEG", quality=90, optimize=True)
+        if tmp.stat().st_size < 1024:
+            tmp.unlink(missing_ok=True)
+            return False
+        tmp.replace(dest)
+        return True
+    except Exception:
+        return False
+
+
+def _save_image_file(src: Path, dest: Path) -> bool:
+    try:
+        return _save_image_bytes(src.read_bytes(), dest)
+    except Exception:
+        return False
+
+
+def _save_embedded_cover(track_path: str, dest: Path) -> bool:
+    rel = (track_path or "").strip()
+    if not rel:
+        return False
+    blob = bytearray()
+    try:
+        with mpd_client() as c:
+            try:
+                first = c.readpicture(rel)
+            except Exception:
+                try:
+                    first = c.albumart(rel)
+                except Exception:
+                    return False
+            if not isinstance(first, dict):
+                return False
+            binary = first.get("binary") or b""
+            if isinstance(binary, str):
+                binary = binary.encode("latin1", errors="ignore")
+            if not binary:
+                return False
+            blob.extend(binary)
+            try:
+                size_hint = int(first.get("size") or 0)
+            except Exception:
+                size_hint = 0
+            if size_hint > len(blob):
+                offset = len(blob)
+                while offset < size_hint:
+                    try:
+                        nxt = c.readpicture(rel, offset)
+                    except Exception:
+                        break
+                    if not isinstance(nxt, dict):
+                        break
+                    extra = nxt.get("binary") or b""
+                    if isinstance(extra, str):
+                        extra = extra.encode("latin1", errors="ignore")
+                    if not extra:
+                        break
+                    blob.extend(extra)
+                    offset += len(extra)
+    except Exception:
+        return False
+    return _save_image_bytes(bytes(blob), dest)
+
+
 def _wait_mpd_update(c: MPDClient, timeout_s: int = 120):
     start = time.time()
     while time.time() - start < timeout_s:
@@ -3950,9 +4211,23 @@ def _docs_fetch_worker(force: bool = False):
         photos_dir = DOCS_ROOT / "Photos d'artiste"
         force_photos = force or _dir_empty(photos_dir)
         with _db_session() as conn:
-            artists = [r["name"] for r in conn.execute("SELECT DISTINCT artist as name FROM track WHERE artist IS NOT NULL")]
+            artists = [
+                r["name"]
+                for r in conn.execute(
+                    """
+                    SELECT DISTINCT COALESCE(NULLIF(artist, ''), NULLIF(albumartist, '')) as name
+                    FROM track
+                    WHERE COALESCE(NULLIF(artist, ''), NULLIF(albumartist, '')) IS NOT NULL
+                    """
+                )
+            ]
             albums = conn.execute(
-                "SELECT DISTINCT album, artist FROM track WHERE album IS NOT NULL AND artist IS NOT NULL"
+                """
+                SELECT DISTINCT album, COALESCE(NULLIF(artist, ''), NULLIF(albumartist, '')) AS artist
+                FROM track
+                WHERE album IS NOT NULL
+                  AND COALESCE(NULLIF(artist, ''), NULLIF(albumartist, '')) IS NOT NULL
+                """
             ).fetchall()
         DOCS_STATE["total_artists"] = len(artists)
         DOCS_STATE["total_albums"] = len(albums)
@@ -4048,14 +4323,28 @@ def _fetch_album_docs(artist: str, album: str, force: bool):
     if cover_path.exists() and not force:
         _log_event(DOCS_STATE, "info", "Pochette déjà présente", album=album)
     else:
+        track_path = _pick_album_track_path(artist, album)
         img_url, source = _get_album_cover(artist, album)
         if img_url:
             if _download_image(img_url, cover_path):
                 _log_event(DOCS_STATE, "info", "Pochette enregistrée", album=album, source=source)
             else:
                 _log_event(DOCS_STATE, "warn", "Pochette download échouée", album=album, source=source)
+                local_cover = _find_local_album_cover(artist, album, track_path=track_path)
+                if local_cover and _save_image_file(local_cover, cover_path):
+                    _log_event(DOCS_STATE, "info", "Pochette locale copiée", album=album, source="local-file")
+                elif track_path and _save_embedded_cover(track_path, cover_path):
+                    _log_event(DOCS_STATE, "info", "Pochette extraite du fichier", album=album, source="embedded")
+                else:
+                    _log_event(DOCS_STATE, "warn", "Pochette introuvable", album=album)
         else:
-            _log_event(DOCS_STATE, "warn", "Pochette introuvable", album=album)
+            local_cover = _find_local_album_cover(artist, album, track_path=track_path)
+            if local_cover and _save_image_file(local_cover, cover_path):
+                _log_event(DOCS_STATE, "info", "Pochette locale copiée", album=album, source="local-file")
+            elif track_path and _save_embedded_cover(track_path, cover_path):
+                _log_event(DOCS_STATE, "info", "Pochette extraite du fichier", album=album, source="embedded")
+            else:
+                _log_event(DOCS_STATE, "warn", "Pochette introuvable", album=album)
 
 
 def _get_artist_bio(name: str) -> Tuple[Optional[str], str, str]:
@@ -4655,15 +4944,7 @@ def _download_image(url: str, dest: Path) -> bool:
         content_type = (res.headers.get("Content-Type") or "").lower()
         if "image/svg" in content_type:
             return False
-        data = res.content
-        img = Image.open(io.BytesIO(data)).convert("RGB")
-        tmp = dest.with_suffix(".tmp.jpg")
-        img.save(tmp, "JPEG", quality=90, optimize=True)
-        if tmp.stat().st_size < 1024:
-            tmp.unlink(missing_ok=True)
-            return False
-        tmp.replace(dest)
-        return True
+        return _save_image_bytes(res.content, dest)
     except Exception:
         return False
 

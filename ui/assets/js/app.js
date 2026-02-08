@@ -42,6 +42,40 @@ registerRoute("settings",  { title: "Paramètres", render: Settings.render });
 registerRoute("about",     { title: "À propos", render: About.render });
 registerRoute("search",    { title: "Recherche", render: Search.render });
 
+const UI_VERSION_KEY = "toune.ui.version";
+const mqDrawerOverlay = window.matchMedia("(max-width: 1180px)");
+const mqMobile = window.matchMedia("(max-width: 980px)");
+const mqCoarse = window.matchMedia("(pointer: coarse)");
+
+function supportsMatchMediaEvents(mq){
+  return !!mq && typeof mq.addEventListener === "function";
+}
+
+function isDrawerOverlay(){
+  return mqDrawerOverlay.matches;
+}
+
+async function ensureUiVersion(){
+  if(AppConfig.transport === "mock") return;
+  try {
+    const res = await fetch(`${AppConfig.restBaseUrl}/ui/version`, {cache: "no-store"});
+    const body = await res.json();
+    const v = body?.ok ? String(body.data?.version || "") : "";
+    if(!v) return;
+    const prev = String(localStorage.getItem(UI_VERSION_KEY) || "");
+    if(prev && prev !== v){
+      localStorage.setItem(UI_VERSION_KEY, v);
+      window.location.reload();
+      return new Promise(()=>{});
+    }
+    localStorage.setItem(UI_VERSION_KEY, v);
+  } catch {
+    // best effort only
+  }
+}
+
+await ensureUiVersion();
+
 // Init UI
 applyTheme(store.get().ui.theme);
 store.subscribe((st)=>applyTheme(st.ui.theme));
@@ -100,12 +134,57 @@ mpd.onUpdate((nextState)=>{
 
 // Drawer behavior
 const drawer = $("#drawer");
+const drawerBackdrop = $("#drawerBackdrop");
 const btnMenu = $("#btnMenu");
-btnMenu?.addEventListener("click", ()=>{
-  if(window.matchMedia("(max-width: 980px)").matches){
-    drawer?.classList.toggle("open");
+
+let drawerBackdropHideTimer = null;
+
+function syncTouchUiClass(){
+  const touchUi = mqCoarse.matches || isDrawerOverlay();
+  document.body.classList.toggle("touch-ui", touchUi);
+}
+
+function openDrawer(){
+  if(!drawer || !isDrawerOverlay()) return;
+  drawer.classList.add("open");
+  if(drawerBackdrop){
+    drawerBackdrop.hidden = false;
+    requestAnimationFrame(()=>drawerBackdrop.classList.add("open"));
   }
+}
+
+function closeDrawer(){
+  if(!drawer) return;
+  drawer.classList.remove("open");
+  if(drawerBackdrop){
+    drawerBackdrop.classList.remove("open");
+    if(drawerBackdropHideTimer) clearTimeout(drawerBackdropHideTimer);
+    drawerBackdropHideTimer = setTimeout(()=>{
+      if(!drawer.classList.contains("open")){
+        drawerBackdrop.hidden = true;
+      }
+    }, 220);
+  }
+}
+
+btnMenu?.addEventListener("click", ()=>{
+  if(!isDrawerOverlay()) return;
+  if(drawer?.classList.contains("open")) closeDrawer();
+  else openDrawer();
 });
+drawerBackdrop?.addEventListener("click", closeDrawer);
+syncTouchUiClass();
+if(supportsMatchMediaEvents(mqDrawerOverlay)){
+  mqDrawerOverlay.addEventListener("change", ()=>{
+    if(!isDrawerOverlay()) closeDrawer();
+    syncTouchUiClass();
+    renderQueuePane(store.get().player);
+  });
+}
+if(supportsMatchMediaEvents(mqCoarse)){
+  mqCoarse.addEventListener("change", syncTouchUiClass);
+}
+window.addEventListener("resize", syncTouchUiClass);
 
 // Player chip
 $("#btnPlayer")?.addEventListener("click", ()=>navigate("players"));
@@ -135,10 +214,10 @@ function syncNav(route){
 }
 store.subscribe((st)=>syncNav(st.route));
 
-// Close drawer on mobile route change
+// Close drawer on route change when drawer is in overlay mode
 window.addEventListener("hashchange", ()=>{
-  if(window.matchMedia("(max-width: 980px)").matches){
-    drawer?.classList.remove("open");
+  if(isDrawerOverlay()){
+    closeDrawer();
   }
 });
 
@@ -192,6 +271,8 @@ window.addEventListener("keydown", (ev)=>{
   } else if(ev.key === "Escape"){
     if(searchInput?.value){
       $("#btnSearchClear")?.click();
+    } else if(drawer?.classList.contains("open")){
+      closeDrawer();
     }
   } else if(ev.key === "q" || ev.key === "Q"){
     navigate("queue");
@@ -665,25 +746,56 @@ window.addEventListener("hashchange", ()=>{
 });
 
 (()=>{
-  const target = $("#content");
-  if(!target) return;
+  if(!$("#content")) return;
   let x0 = null;
   let y0 = null;
-  target.addEventListener("touchstart", (e)=>{
-    if(!window.matchMedia("(max-width: 980px)").matches) return;
+  let startEdge = false;
+  let startInDrawer = false;
+  let blocked = false;
+
+  document.addEventListener("touchstart", (e)=>{
+    if(!isDrawerOverlay() && !mqMobile.matches) return;
     const t = e.touches?.[0];
     if(!t) return;
+    const target = e.target instanceof Element ? e.target : null;
     x0 = t.clientX;
     y0 = t.clientY;
+    startEdge = t.clientX <= 30;
+    startInDrawer = !!target?.closest("#drawer");
+    blocked = !!target?.closest("input, textarea, select, button, [contenteditable='true']");
   }, {passive:true});
-  target.addEventListener("touchend", (e)=>{
+
+  document.addEventListener("touchend", (e)=>{
     if(x0 == null || y0 == null) return;
     const t = e.changedTouches?.[0];
+    const startX = x0;
+    const startY = y0;
+    x0 = null;
+    y0 = null;
     if(!t) return;
-    const dx = t.clientX - x0;
-    const dy = t.clientY - y0;
-    x0 = y0 = null;
-    if(Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy)) return;
+    const dx = t.clientX - startX;
+    const dy = t.clientY - startY;
+    const absDx = Math.abs(dx);
+    const absDy = Math.abs(dy);
+    const mostlyHorizontal = absDx > 70 && absDx > absDy * 1.2;
+    const canUseGesture = !blocked && mostlyHorizontal;
+    blocked = false;
+    if(!canUseGesture) return;
+
+    if(isDrawerOverlay()){
+      if(drawer?.classList.contains("open")){
+        if(dx < -70 && (startInDrawer || startEdge || t.clientX < 250)){
+          closeDrawer();
+          return;
+        }
+      } else if(dx > 70 && startEdge){
+        openDrawer();
+        return;
+      }
+    }
+
+    if(!mqMobile.matches) return;
+    if(startInDrawer || startEdge) return;
     const r = store.get().route;
     if(dx < 0){
       // swipe left

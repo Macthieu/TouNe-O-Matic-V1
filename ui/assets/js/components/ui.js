@@ -54,9 +54,9 @@ export function pill(text){
   return h("span", {class:"pill"}, text);
 }
 
-export function button(label, {kind="default", onClick=null}={}){
+export function button(label, {kind="default", onClick=null, disabled=false}={}){
   const cls = kind === "primary" ? "btn primary" : kind === "danger" ? "btn danger" : "btn";
-  return h("button", {class:cls, type:"button", onclick:onClick}, label);
+  return h("button", {class:cls, type:"button", onclick:onClick, disabled}, label);
 }
 
 export function chip(label, {onClick=null}={}){
