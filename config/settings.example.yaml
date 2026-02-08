@@ -1,0 +1,33 @@
+state_dir: /srv/toune/repo/toune-o-matic/.state
+data_dir: /srv/toune/data
+db_path: /srv/toune/data/toune.db
+cache_dir: /srv/toune/data/cache
+
+library:
+  roots:
+    - /mnt/media/USB1/Musique
+    - /mnt/media/NAS1/music
+  media_root: /mnt/media
+  link_root: /mnt/libraries/music
+  playlists_dir: /mnt/libraries/playlists
+  docs_dir: /mnt/libraries/docs
+  scan:
+    incremental: true
+    startup_quick_scan: true
+
+audio:
+  mode: strict # strict | compatible
+  alsa_device_strict: "hw:CARD=InnoMaker,DEV=0"
+  alsa_device_compatible: "plughw:CARD=InnoMaker,DEV=0"
+
+mpd:
+  host: 127.0.0.1
+  port: 6600
+
+snapcast:
+  rpc_url: http://127.0.0.1:1780/jsonrpc
+
+analog:
+  mode: pure # pure | cast
+  adc_device: ""
+  cast_stream: line-in

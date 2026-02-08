@@ -1,0 +1,19 @@
+[Unit]
+Description=Toune-o-matic Command/State Daemon
+After=network.target mpd.service
+Wants=mpd.service
+
+[Service]
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/Logiciel/TouNe-O-Matic-V1-main
+Environment="PATH=/home/pi/Logiciel/TouNe-O-Matic-V1-main/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+Environment="TOUNE_STATE_DIR=/home/pi/Logiciel/TouNe-O-Matic-V1-main/.state"
+Environment="TOUNE_QUEUE_RESTORE=1"
+ExecStart=/home/pi/Logiciel/TouNe-O-Matic-V1-main/.venv/bin/python /home/pi/Logiciel/TouNe-O-Matic-V1-main/backend/daemon.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

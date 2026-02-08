@@ -1,0 +1,13 @@
+.DS_Store
+*.pyc
+__pycache__/
+.venv/
+venv/
+.vscode/
+*.log
+*.tmp
+.state/
+.data/
+data/
+cache/
+*.db

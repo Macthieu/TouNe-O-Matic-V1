@@ -1,0 +1,11 @@
+[Unit]
+Description=Toune-o-matic Library Links Sync
+After=network.target toune-api.service
+Wants=toune-api.service
+
+[Service]
+Type=oneshot
+User=pi
+Group=pi
+Environment="TOUNE_API_BASE=http://127.0.0.1:11000/api"
+ExecStart=/bin/bash /home/pi/Logiciel/TouNe-O-Matic-V1-main/scripts/sync-library-links.sh

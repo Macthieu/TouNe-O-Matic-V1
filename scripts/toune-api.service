@@ -1,0 +1,27 @@
+[Unit]
+Description=Toune-o-matic Backend API
+After=network.target mpd.service
+Wants=mpd.service
+
+[Service]
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/Logiciel/TouNe-O-Matic-V1-main
+Environment="PATH=/home/pi/Logiciel/TouNe-O-Matic-V1-main/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+Environment="TOUNE_STATE_DIR=/home/pi/Logiciel/TouNe-O-Matic-V1-main/.state"
+Environment="TOUNE_DB_PATH=/home/pi/Logiciel/TouNe-O-Matic-V1-main/.data/toune.db"
+Environment="TOUNE_CACHE_DIR=/home/pi/Logiciel/TouNe-O-Matic-V1-main/.data/cache"
+Environment="TOUNE_MEDIA_ROOT=/mnt/media"
+Environment="TOUNE_MUSIC_ROOT=/mnt/libraries/music"
+Environment="TOUNE_PLAYLISTS_DIR=/mnt/libraries/playlists"
+Environment="TOUNE_DOCS_ROOT=/mnt/libraries/docs"
+Environment="TOUNE_HOST=0.0.0.0"
+Environment="TOUNE_PORT=11000"
+Environment="TOUNE_DEBUG=0"
+ExecStart=/home/pi/Logiciel/TouNe-O-Matic-V1-main/.venv/bin/python /home/pi/Logiciel/TouNe-O-Matic-V1-main/backend/app.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="color-scheme" content="dark light" />
+  <title>TouNe-O-Matic • Material GUI</title>
+  <link rel="icon" href="assets/img/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/css/app.css" />
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <!-- AppBar -->
+    <header class="appbar">
+      <div class="appbar__left">
+        <div class="appbar__title" aria-label="Page">
+          <span id="appTitle">Accueil</span>
+        </div>
+      </div>
+
+      <div class="appbar__center">
+        <div class="appbar__search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 2a8 8 0 105.293 14.293l4.707 4.707 1.414-1.414-4.707-4.707A8 8 0 0010 2zm0 2a6 6 0 110 12 6 6 0 010-12z"/></svg>
+          <input id="searchInput" type="search" placeholder="Rechercher…" autocomplete="off" />
+          <button class="icon-btn" id="btnSearchClear" aria-label="Effacer la recherche" title="Effacer">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18.3 5.71L12 12l6.3 6.29-1.41 1.42L10.59 13.4 4.29 19.71 2.88 18.29 9.17 12 2.88 5.71 4.29 4.29 10.59 10.6l6.3-6.31 1.41 1.42z"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="appbar__right">
+        <div class="vol" aria-label="Volume">
+          <svg class="vol__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10v4h4l5 5V5L7 10H3zm13.5 2a4.5 4.5 0 00-2.5-4v8a4.5 4.5 0 002.5-4zm0-9.5v2.2A9 9 0 0121 12a9 9 0 01-4.5 7.3v2.2A11 11 0 0023 12 11 11 0 0016.5 2.5z"/></svg>
+          <input id="volRange" type="range" min="0" max="100" value="29" />
+          <span class="vol__pct" id="volPct">29%</span>
+        </div>
+
+        <button class="icon-btn" id="btnTheme" aria-label="Changer le thème" title="Thème">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 108.94 10.06A7 7 0 0112 3z"/></svg>
+        </button>
+        <button class="icon-btn" id="btnFullscreen" aria-label="Plein écran" title="Plein écran">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 14H5v5h5v-2H7v-3zm0-4h2V7h3V5H7v5zm10 9h-3v2h5v-5h-2v3zm0-14V5h-5v2h3v3h2V5z"/></svg>
+        </button>
+        <button class="icon-btn" id="btnMore" aria-label="Plus" title="Plus">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7a2 2 0 110-4 2 2 0 010 4zm0 7a2 2 0 110-4 2 2 0 010 4zm0 7a2 2 0 110-4 2 2 0 010 4z"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Drawer -->
+    <aside class="drawer" id="drawer" aria-label="Navigation">
+      <div class="drawer__header">
+        <div class="logo">
+          <span class="logo__dot"></span>
+          <div>
+            <div class="logo__name">TouNe-O-Matic</div>
+            <div class="logo__sub">Material WebGUI (UI only)</div>
+          </div>
+        </div>
+      </div>
+
+      <nav class="drawer__nav">
+        <div class="nav-section">
+          <div class="nav-section__title">Parcourir</div>
+          <a class="nav-item" href="#/home" data-route="home">
+            <span class="nav-item__icon">🏠</span><span>Accueil</span>
+          </a>
+          <a class="nav-item" href="#/music" data-route="music">
+            <span class="nav-item__icon">🎵</span><span>Ma musique</span>
+          </a>
+          <a class="nav-item" href="#/radio" data-route="radio">
+            <span class="nav-item__icon">📻</span><span>Radio</span>
+          </a>
+          <div class="nav-subtitle">Favoris</div>
+          <a class="nav-item nav-item--sub" href="#/favourites?view=tracks" data-route="favourites" data-view="tracks">
+            <span class="nav-item__icon">🎵</span><span>Pistes</span>
+          </a>
+          <a class="nav-item nav-item--sub" href="#/favourites?view=radio" data-route="favourites" data-view="radio">
+            <span class="nav-item__icon">📻</span><span>Radios</span>
+          </a>
+          <a class="nav-item" href="#/playlists" data-route="playlists">
+            <span class="nav-item__icon">📋</span><span>Playlists</span>
+          </a>
+          <a class="nav-item" href="#/apps" data-route="apps">
+            <span class="nav-item__icon">🧩</span><span>Apps</span>
+          </a>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section__title">Lecteur</div>
+          <a class="nav-item" href="#/now" data-route="now">
+            <span class="nav-item__icon">▶️</span><span>En lecture</span>
+          </a>
+          <a class="nav-item" href="#/queue" data-route="queue">
+            <span class="nav-item__icon">🧾</span><span>File d’attente</span>
+          </a>
+          <a class="nav-item" href="#/outputs" data-route="outputs">
+            <span class="nav-item__icon">🔌</span><span>Sorties</span>
+          </a>
+          <a class="nav-item" href="#/inputs" data-route="inputs">
+            <span class="nav-item__icon">🎚️</span><span>Entrées</span>
+          </a>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section__title">Système</div>
+          <a class="nav-item" href="#/settings" data-route="settings">
+            <span class="nav-item__icon">⚙️</span><span>Paramètres</span>
+          </a>
+          <a class="nav-item" href="#/about" data-route="about">
+            <span class="nav-item__icon">ℹ️</span><span>À propos</span>
+          </a>
+        </div>
+      </nav>
+
+      <div class="drawer__footer">
+        <div class="small muted">
+          UI inspirée de Material Skin (Lyrion/LMS), mais implémentée from scratch.
+        </div>
+      </div>
+    </aside>
+
+    <main class="content" id="content" tabindex="-1">
+      <div class="split">
+        <!-- Router outlet (main pane) -->
+        <div id="view" class="pane pane--main"></div>
+
+        <!-- Desktop queue pane (always visible on large screens) -->
+        <aside class="pane pane--queue" id="queuePane" aria-label="File d’attente (panneau)">
+          <div class="queuepane__top">
+            <div>
+              <div class="strong">File</div>
+              <div class="muted small" id="queuePaneSummary">—</div>
+            </div>
+            <div class="queuepane__actions">
+              <button class="icon-btn" id="btnQueueClear" title="Vider" aria-label="Vider">
+                <svg viewBox="0 0 24 24"><path d="M6 7h12l-1 14H7L6 7zm3-3h6l1 2H8l1-2z"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="queuepane__list" id="queuePaneList"></div>
+        </aside>
+      </div>
+    </main>
+
+    <!-- Player Bar (mini player) -->
+    <footer class="playerbar" id="playerbar" aria-label="Contrôles de lecture">
+      <div class="playerbar__left" id="playerbarLeft">
+        <div class="cover cover--sm" id="miniCover"></div>
+        <div class="playerbar__meta">
+          <div class="ellipsis strong" id="miniTitle">—</div>
+          <div class="ellipsis muted" id="miniArtist">—</div>
+        </div>
+      </div>
+
+      <div class="playerbar__center">
+        <div class="playerbar__controls">
+          <button class="icon-btn" id="btnPrev" aria-label="Précédent" title="Précédent">
+            <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6V6zm3.5 6l10 6V6l-10 6z"/></svg>
+          </button>
+          <button class="fab" id="btnPlayPause" aria-label="Lecture/Pause" title="Lecture/Pause">
+            <svg id="iconPlayPause" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+          </button>
+          <button class="icon-btn" id="btnNext" aria-label="Suivant" title="Suivant">
+            <svg viewBox="0 0 24 24"><path d="M16 6h2v12h-2V6zM4 18l10-6L4 6v12z"/></svg>
+          </button>
+        </div>
+
+        <div class="playerbar__progress">
+          <input id="seek" type="range" min="0" max="1000" value="0" aria-label="Position" />
+          <div class="playerbar__times">
+            <span class="time muted" id="tCur">0:00</span>
+            <span class="time muted" id="tDur">0:00</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="playerbar__right">
+        <button class="icon-btn" id="btnQueue" aria-label="Ouvrir la file" title="File">
+          <svg viewBox="0 0 24 24"><path d="M3 10h14v2H3v-2zm0-4h18v2H3V6zm0 8h10v2H3v-2zm16 0v-2h2v2h-2zm0-8h2v2h-2V6zm0 4h2v2h-2v-2z"/></svg>
+        </button>
+        <button class="icon-btn" id="btnOutput" aria-label="Sortie audio" title="Sortie">
+          <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 109 9 9 9 0 00-9-9zm-1 5h2v8h-2zm0 10h2v2h-2z"/></svg>
+        </button>
+        <span class="sync-badge" id="queueSyncBadge" title="Synchronisation queue">
+          <span class="sync-dot"></span>
+          <span class="sync-text">sync</span>
+        </span>
+        <button class="icon-btn" id="btnVol" aria-label="Volume" title="Volume">
+          <svg viewBox="0 0 24 24"><path d="M3 10v4h4l5 5V5L7 10H3zm13.5 2a4.5 4.5 0 00-2.5-4v8a4.5 4.5 0 002.5-4zm0-9.5v2.2A9 9 0 0121 12a9 9 0 01-4.5 7.3v2.2A11 11 0 0023 12 11 11 0 0016.5 2.5z"/></svg>
+        </button>
+      </div>
+    </footer>
+
+    <div class="cmd-toast" id="cmdToast" hidden></div>
+
+    <!-- Bottom sheet: Queue -->
+    <div class="sheet-backdrop" id="sheetBackdrop" hidden></div>
+    <section class="sheet" id="queueSheet" aria-label="File d’attente" hidden>
+      <div class="sheet__header">
+        <div>
+          <div class="strong">File d’attente</div>
+          <div class="muted small" id="queueSummary">—</div>
+        </div>
+        <div class="sheet__actions">
+          <button class="chip" id="btnShuffle">Aléatoire</button>
+          <button class="chip" id="btnRepeat">Répéter</button>
+          <button class="icon-btn" id="btnSheetClose" aria-label="Fermer">
+            <svg viewBox="0 0 24 24"><path d="M18.3 5.71L12 12l6.3 6.29-1.41 1.42L10.59 13.4 4.29 19.71 2.88 18.29 9.17 12 2.88 5.71 4.29 4.29 10.59 10.6l6.3-6.31 1.41 1.42z"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="sheet__body" id="queueList"></div>
+    </section>
+
+    <!-- Simple menu -->
+    <div class="menu" id="menuMore" hidden>
+      <button class="menu__item" id="mnuGoNow">Aller à “En lecture”</button>
+      <button class="menu__item" id="mnuGoPlayers">Appareils</button>
+      <button class="menu__item" id="mnuGoSettings">Paramètres</button>
+      <div class="menu__sep"></div>
+      <button class="menu__item danger" id="mnuResetDemo">Réinitialiser démo</button>
+    </div>
+
+    <div class="menu" id="menuOutput" hidden>
+      <div class="menu__item muted small">Sortie rapide</div>
+      <button class="menu__item" id="mnuOutputAirplay">AirPlay: —</button>
+      <button class="menu__item" id="mnuOutputBluetooth">Bluetooth: —</button>
+      <div class="menu__sep"></div>
+      <button class="menu__item" id="mnuOutputSettings">Ouvrir paramètres…</button>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  </div>
+
+  <script type="module" src="assets/js/app.js"></script>
+</body>
+</html>
