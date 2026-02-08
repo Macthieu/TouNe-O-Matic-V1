@@ -68,6 +68,7 @@ BIT_PERFECT_OUTPUTS = [
     if s.strip()
 ]
 PLAYLIST_PREFIXES = [
+    f"{MUSIC_ROOT.as_posix().rstrip('/')}/",
     "/mnt/libraries/music/",
     "/mnt/media/wd/Musique/",
     "/mnt/librairies/music/",  # typo seen in imported playlists

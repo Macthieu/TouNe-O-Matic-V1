@@ -5,12 +5,12 @@ cache_dir: /srv/toune/data/cache
 
 library:
   roots:
-    - /mnt/media/USB1/Musique
+    - /mnt/one_touch/music
     - /mnt/media/NAS1/music
   media_root: /mnt/media
   link_root: /mnt/libraries/music
-  playlists_dir: /mnt/libraries/playlists
-  docs_dir: /mnt/libraries/docs
+  playlists_dir: /mnt/one_touch/playlists
+  docs_dir: /mnt/one_touch/documents
   scan:
     incremental: true
     startup_quick_scan: true
