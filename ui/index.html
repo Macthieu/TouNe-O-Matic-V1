@@ -125,6 +125,14 @@
     <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
 
     <main class="content" id="content" tabindex="-1">
+      <nav class="mobile-tabs" id="mobileTabs" aria-label="Navigation mobile">
+        <button class="mobile-tabs__item" type="button" data-route="home">🏠<span>Accueil</span></button>
+        <button class="mobile-tabs__item" type="button" data-route="music">🎵<span>Musique</span></button>
+        <button class="mobile-tabs__item" type="button" data-route="radio">📻<span>Radio</span></button>
+        <button class="mobile-tabs__item" type="button" data-route="now">▶️<span>Lecture</span></button>
+        <button class="mobile-tabs__item" type="button" data-route="queue">🧾<span>File</span></button>
+        <button class="mobile-tabs__item" type="button" data-route="outputs">🔌<span>Sorties</span></button>
+      </nav>
       <div class="split">
         <!-- Router outlet (main pane) -->
         <div id="view" class="pane pane--main"></div>

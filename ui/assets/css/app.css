@@ -346,6 +346,8 @@ svg{ fill: currentColor; }
   height: calc(100vh - var(--appbar-total-h) - var(--playerbar-total-h));
   overflow:auto;
   scrollbar-gutter: stable;
+  display:flex;
+  flex-direction:column;
 }
 
 .touch-ui .pane--main{
@@ -387,9 +389,45 @@ svg{ fill: currentColor; }
 }
 
 .split{
-  height:100%;
+  flex: 1 1 auto;
+  min-height: 0;
   display:grid;
   grid-template-columns: 1fr 420px;
+}
+
+.mobile-tabs{
+  display:none;
+  align-items:center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in oklab, var(--card2) 86%, transparent);
+}
+.mobile-tabs__item{
+  min-width: 64px;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  cursor:pointer;
+}
+.mobile-tabs__item span{
+  font-size: 10px;
+  line-height: 1.1;
+  letter-spacing: .02em;
+}
+.mobile-tabs__item.is-active{
+  color: var(--text);
+  background: rgba(59,130,246,.16);
+  border-color: rgba(59,130,246,.3);
 }
 
 .pane{ min-width:0; }
@@ -1151,6 +1189,16 @@ input.is-disabled{
   .appbar__center{ justify-content:flex-start; }
   .appbar__menu{ display:inline-flex; }
   .appbar__search{ width: 100%; }
+  .mobile-tabs{
+    display:flex;
+    position: sticky;
+    top: 0;
+    z-index: 35;
+    overflow-x:auto;
+    scrollbar-width: none;
+  }
+  .mobile-tabs::-webkit-scrollbar{ display:none; }
+  .mobile-tabs__item{ flex: 0 0 auto; }
 
   .vol{ display:none; }
 }
@@ -1162,6 +1210,23 @@ input.is-disabled{
     gap: 6px;
     padding: 10px 10px calc(10px + var(--safe-bottom));
     min-height: var(--playerbar-total-h);
+  }
+  .appbar{
+    gap: 8px;
+    padding-inline: 8px;
+  }
+  .appbar__right{
+    gap: 4px;
+  }
+  .appbar__search{
+    min-width: 0;
+    padding: 7px 9px;
+  }
+  .pane--main{
+    padding: 12px 10px 14px;
+  }
+  .card{
+    border-radius: 18px;
   }
   .playerbar__right{ display:none; }
 }
@@ -1179,6 +1244,43 @@ input.is-disabled{
   .tilegrid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .player-chip__name{ max-width: 120px; }
   .appbar__right #btnFullscreen{ display:none; }
+}
+
+@media (max-width: 760px){
+  .appbar__right #btnTheme,
+  .appbar__right #btnMore{
+    display:none;
+  }
+  .appbar__title{
+    font-size: 13px;
+  }
+  .mobile-tabs{
+    padding: 6px 8px;
+    gap: 4px;
+  }
+  .mobile-tabs__item{
+    min-width: 56px;
+    border-radius: 10px;
+    padding: 6px 6px;
+  }
+  .mobile-tabs__item span{
+    font-size: 9px;
+  }
+  .playerbar__left{
+    padding: 6px 6px;
+  }
+  .playerbar__left .cover{
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+  }
+  .playerbar__controls{
+    gap: 6px;
+  }
+  .fab{
+    width: 42px;
+    height: 42px;
+  }
 }
 
 /* More menu + toast */

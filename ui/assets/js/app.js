@@ -45,6 +45,7 @@ registerRoute("search",    { title: "Recherche", render: Search.render });
 const UI_VERSION_KEY = "toune.ui.version";
 const mqDrawerOverlay = window.matchMedia("(max-width: 1180px)");
 const mqMobile = window.matchMedia("(max-width: 980px)");
+const mqPhone = window.matchMedia("(max-width: 760px)");
 const mqCoarse = window.matchMedia("(pointer: coarse)");
 
 function supportsMatchMediaEvents(mq){
@@ -139,7 +140,12 @@ const btnMenu = $("#btnMenu");
 
 let drawerBackdropHideTimer = null;
 
-function syncTouchUiClass(){
+function syncResponsiveClasses(){
+  const isPhone = mqPhone.matches;
+  const isTablet = !isPhone && mqDrawerOverlay.matches;
+  document.body.classList.toggle("device-phone", isPhone);
+  document.body.classList.toggle("device-tablet", isTablet);
+  document.body.classList.toggle("device-desktop", !isPhone && !isTablet);
   const touchUi = mqCoarse.matches || isDrawerOverlay();
   document.body.classList.toggle("touch-ui", touchUi);
 }
@@ -173,18 +179,30 @@ btnMenu?.addEventListener("click", ()=>{
   else openDrawer();
 });
 drawerBackdrop?.addEventListener("click", closeDrawer);
-syncTouchUiClass();
+syncResponsiveClasses();
 if(supportsMatchMediaEvents(mqDrawerOverlay)){
   mqDrawerOverlay.addEventListener("change", ()=>{
     if(!isDrawerOverlay()) closeDrawer();
-    syncTouchUiClass();
+    syncResponsiveClasses();
     renderQueuePane(store.get().player);
   });
 }
 if(supportsMatchMediaEvents(mqCoarse)){
-  mqCoarse.addEventListener("change", syncTouchUiClass);
+  mqCoarse.addEventListener("change", syncResponsiveClasses);
 }
-window.addEventListener("resize", syncTouchUiClass);
+if(supportsMatchMediaEvents(mqPhone)){
+  mqPhone.addEventListener("change", syncResponsiveClasses);
+}
+window.addEventListener("resize", syncResponsiveClasses);
+
+const mobileTabs = $("#mobileTabs");
+mobileTabs?.addEventListener("click", (ev)=>{
+  const btn = ev.target instanceof Element ? ev.target.closest(".mobile-tabs__item") : null;
+  if(!btn) return;
+  const route = btn.getAttribute("data-route");
+  if(!route) return;
+  navigate(route);
+});
 
 // Player chip
 $("#btnPlayer")?.addEventListener("click", ()=>navigate("players"));
@@ -204,12 +222,18 @@ function syncNav(route){
   const params = new URLSearchParams(location.hash.split("?")[1] || "");
   let view = params.get("view") || "";
   if(route === "favourites" && !view) view = "tracks";
+  const normalizedRoute = route === "players" ? "outputs" : route;
   $$(".nav-item").forEach(a=>{
     const r = a.getAttribute("data-route");
     const v = a.getAttribute("data-view") || "";
     const matches = r === route && (!v || v === view);
     if(matches) a.setAttribute("aria-current","page");
     else a.removeAttribute("aria-current");
+  });
+  $$(".mobile-tabs__item").forEach((btn)=>{
+    const r = btn.getAttribute("data-route");
+    btn.classList.toggle("is-active", r === normalizedRoute);
+    btn.setAttribute("aria-pressed", r === normalizedRoute ? "true" : "false");
   });
 }
 store.subscribe((st)=>syncNav(st.route));
