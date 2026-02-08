@@ -42,7 +42,7 @@ export async function render(root){
   const recentAlbums = (st.library.newmusic || st.library.albums || []).slice(0, 8);
   body.appendChild(el("div", { className: "card" }, [
     el("div", { className: "card__title" }, ["Récents"]),
-    el("div", { className: "hscroll" }, recentAlbums.map(a=>
+    el("div", { className: "hscroll hscroll--home" }, recentAlbums.map(a=>
       el("button", { className: "albumcard", type: "button", onclick: ()=>navigate("album", new URLSearchParams({id:a.id})) }, [
         el("div", { className: "cover", style: coverStyle(a) }, []),
         el("div", { className: "albumcard__title ellipsis" }, [a.title]),
@@ -53,7 +53,7 @@ export async function render(root){
 
   // Hint
   body.appendChild(el("div", { className: "hint muted" }, [
-    "Mobile: glisse ↔ pour changer de vue (Parcourir ↔ Lecture ↔ File).",
+    "Mobile/Tablette: utilise les onglets en haut, et glisse ↔ entre Lecture et File.",
   ]));
 
   root.appendChild(page);

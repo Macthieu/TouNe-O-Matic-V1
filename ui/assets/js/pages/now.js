@@ -18,20 +18,18 @@ export async function render(root){
   });
 
   const wrap = document.createElement("div");
-  wrap.style.display = "grid";
-  wrap.style.gridTemplateColumns = "220px 1fr";
-  wrap.style.gap = "16px";
-  wrap.style.alignItems = "start";
+  wrap.className = "now-layout";
 
   const cover = coverEl("lg", tr?.title || "Couverture");
-  cover.style.marginTop = "6px";
+  cover.classList.add("now-cover");
 
   const meta = document.createElement("div");
+  meta.className = "now-meta";
   meta.innerHTML = `
-    <div class="h1" id="npTitle">—</div>
-    <div class="muted" id="npSubtitle">—</div>
-    <div style="margin-top:10px" class="muted small" id="npDetail">—</div>
-    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px">
+    <div class="h1 now-title" id="npTitle">—</div>
+    <div class="muted now-subtitle" id="npSubtitle">—</div>
+    <div class="muted small now-detail" id="npDetail">—</div>
+    <div class="now-actions">
       <button class="btn primary" id="npPlay">${st.player.state === "play" ? "Pause" : "Lecture"}</button>
       <button class="btn" id="npNext">Suivant</button>
       <button class="btn" id="npMix">Mix</button>
@@ -54,7 +52,7 @@ export async function render(root){
   // Next up
   const next = st.player.queue.slice(st.player.index+1, st.player.index+4);
   const nextCard = document.createElement("div");
-  nextCard.style.marginTop = "14px";
+  nextCard.className = "now-next";
   nextCard.innerHTML = `<div class="strong">À suivre</div><div class="muted small">Prochaines pistes dans la file</div>`;
   const list = document.createElement("div");
   list.className = "list";
