@@ -14,6 +14,8 @@ function tile(icon, label, onClick){
 
 export async function render(root){
   const st = store.get();
+  const isPhone = window.matchMedia("(max-width: 760px)").matches;
+  const isTablet = !isPhone && window.matchMedia("(max-width: 1180px)").matches;
 
   const page = el("div", { className: "page" }, [
     el("div", { className: "page__header" }, [
@@ -25,21 +27,25 @@ export async function render(root){
   const body = el("div", { className: "page__body" });
   page.appendChild(body);
 
+  const pinItems = [
+    tile("👤", "Artists", () => navigate("music", new URLSearchParams({cat:"artists"}))),
+    tile("🆕", "New Music", () => navigate("music", new URLSearchParams({cat:"newmusic"}))),
+    tile("🟢", "Spotty", () => navigate("apps")),
+    tile("📻", "Radio", () => navigate("radio")),
+    tile("⭐", "Favourites", () => navigate("favourites")),
+    tile("🧩", "Apps", () => navigate("apps")),
+  ];
+  const visiblePins = isPhone ? pinItems.slice(0, 4) : isTablet ? pinItems.slice(0, 6) : pinItems;
+
   // Pinned tiles (desktop screenshot vibe)
   body.appendChild(el("div", { className: "card" }, [
     el("div", { className: "card__title" }, ["Épingles"]),
-    el("div", { className: "tilegrid" }, [
-      tile("👤", "Artists", () => navigate("music", new URLSearchParams({cat:"artists"}))),
-      tile("🆕", "New Music", () => navigate("music", new URLSearchParams({cat:"newmusic"}))),
-      tile("🟢", "Spotty", () => navigate("apps")),
-      tile("📻", "Radio", () => navigate("radio")),
-      tile("⭐", "Favourites", () => navigate("favourites")),
-      tile("🧩", "Apps", () => navigate("apps")),
-    ])
+    el("div", { className: "tilegrid" }, visiblePins)
   ]));
 
   // Quick browse
-  const recentAlbums = (st.library.newmusic || st.library.albums || []).slice(0, 8);
+  const recentLimit = isPhone ? 4 : isTablet ? 6 : 8;
+  const recentAlbums = (st.library.newmusic || st.library.albums || []).slice(0, recentLimit);
   body.appendChild(el("div", { className: "card" }, [
     el("div", { className: "card__title" }, ["Récents"]),
     el("div", { className: "hscroll hscroll--home" }, recentAlbums.map(a=>
