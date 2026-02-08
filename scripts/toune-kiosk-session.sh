@@ -19,6 +19,12 @@ if [[ -z "${BROWSER_BIN}" ]]; then
   fi
 fi
 
+if [[ "${URL}" == *"?"* ]]; then
+  URL="${URL}&boot=$(date +%s)"
+else
+  URL="${URL}?boot=$(date +%s)"
+fi
+
 xset -dpms || true
 xset s off || true
 xset s noblank || true

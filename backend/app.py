@@ -20,7 +20,7 @@ import subprocess
 import socket
 from urllib.parse import urlparse
 
-from flask import Flask, jsonify, request, send_file, make_response
+from flask import Flask, jsonify, request, send_file, make_response, redirect
 from PIL import Image
 from flask_cors import CORS
 from mpd import MPDClient, CommandError, ConnectionError as MPDConnectionError
@@ -167,6 +167,14 @@ def _ui_version() -> str:
     if not stamps:
         return str(int(time.time()))
     return str(max(stamps))
+
+
+def _render_index_html(version: str) -> str:
+    p = UI_ROOT / "index.html"
+    html = p.read_text(encoding="utf-8", errors="ignore")
+    html = html.replace("assets/css/app.css", f"assets/css/app.css?v={version}")
+    html = html.replace("assets/js/app.js", f"assets/js/app.js?v={version}")
+    return html
 
 
 def _db_connect():
@@ -1641,7 +1649,17 @@ def ui_index():
     p = UI_ROOT / "index.html"
     if not p.exists():
         return err("ui not found", 404, path=str(p))
-    return _no_cache(make_response(send_file(p)))
+    version = _ui_version()
+    resp = make_response(_render_index_html(version))
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["X-UI-Version"] = version
+    return _no_cache(resp)
+
+
+@app.get("/latest")
+def ui_latest():
+    version = _ui_version()
+    return redirect(f"/?v={version}", code=302)
 
 
 @app.get("/assets/<path:asset_path>")
