@@ -1,7 +1,7 @@
 [Unit]
 Description=TouNe-o-matic Touchscreen Kiosk
-After=network-online.target toune-api.service
-Wants=network-online.target toune-api.service
+After=toune-api.service
+Wants=toune-api.service
 
 [Service]
 User=pi
@@ -9,9 +9,11 @@ Group=pi
 WorkingDirectory=/home/pi
 Environment=HOME=/home/pi
 Environment=DISPLAY=:0
-Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=XDG_RUNTIME_DIR=/run/toune-kiosk
 Environment=TOUNE_KIOSK_URL=http://127.0.0.1:11000
 EnvironmentFile=-/etc/default/toune-kiosk
+RuntimeDirectory=toune-kiosk
+RuntimeDirectoryMode=0700
 ExecStart=/usr/bin/xinit /usr/local/bin/toune-kiosk-session.sh -- :0 -s 0 -dpms vt7 -keeptty
 Restart=always
 RestartSec=3

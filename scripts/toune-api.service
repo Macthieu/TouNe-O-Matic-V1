@@ -1,6 +1,6 @@
 [Unit]
 Description=Toune-o-matic Backend API
-After=network.target mpd.service
+After=network.target
 Wants=mpd.service
 
 [Service]

@@ -31,10 +31,10 @@ xset s noblank || true
 
 if command -v xrandr >/dev/null 2>&1; then
   if [[ -z "${OUTPUT_HINT}" ]]; then
-    for _ in $(seq 1 20); do
+    for _ in $(seq 1 6); do
       OUTPUT_HINT="$(xrandr --query | awk '/ connected/{print $1; exit}')"
       [[ -n "${OUTPUT_HINT}" ]] && break
-      sleep 1
+      sleep 0.5
     done
   fi
   if [[ -n "${OUTPUT_HINT}" ]]; then
@@ -67,6 +67,12 @@ fi
 exec "${BROWSER_BIN}" \
   --kiosk \
   --incognito \
+  --no-first-run \
+  --disable-background-networking \
+  --disable-component-update \
+  --disable-default-apps \
+  --disable-sync \
+  --metrics-recording-only \
   --noerrdialogs \
   --disable-infobars \
   --disable-session-crashed-bubble \
